@@ -494,7 +494,7 @@ audio.onloadedmetadata = () => {   // длительность для стары
   updatePos();
 };
 audio.onended = () => { if (ytMode) { if (S.repeat === 2) { audio.currentTime = 0; audio.play().catch(() => {}); } else ytNextAutomatic(); return; } if (S.repeat === 2) { audio.currentTime = 0; audio.play(); } else step(1, true); };
-audio.onerror = () => { if (ytMode) { toast('Поток недоступен'); ytSetPlaying(false); if(S.wave) { ytFailedSkips++; if(ytFailedSkips>=Math.max(3,ytQ.length)) { S.wave=false; save2(); updModes(); ytMessage('Источники вернули ссылки, но аудио не воспроизводится. Попробуй другой интернет или загрузи MP3.'); ytSetPlaying(false); } else setTimeout(ytNextAutomatic,500); } return; } if (S.cur != null) { toast('Файл не открывается — пропускаю'); setTimeout(() => step(1, true), 600); } };
+audio.onerror = () => { if (ytMode) { const mediaErr = audio.error; const reason = mediaErr ? ({1:'загрузка аудио отменена',2:'ошибка сети при загрузке аудио',3:'не удалось декодировать аудио',4:'формат аудио не поддерживается'}[mediaErr.code] || 'ошибка аудиопотока') : 'поток недоступен'; toast(reason); ytSetPlaying(false); if(S.wave) { ytFailedSkips++; if(ytFailedSkips>=Math.max(3,ytQ.length)) { S.wave=false; save2(); updModes(); ytMessage('Источники вернули ссылки, но аудио не воспроизводится. Попробуй другой интернет или загрузи MP3.'); ytSetPlaying(false); } else setTimeout(ytNextAutomatic,500); } return; } if (S.cur != null) { toast('Файл не открывается — пропускаю'); setTimeout(() => step(1, true), 600); } };
 $('seek').oninput = e => {
   if (audio.duration) audio.currentTime = e.target.value / 1000 * audio.duration;
 };
@@ -838,7 +838,7 @@ async function ytPlay(index) {
       ytSetPlaying(false);
     }
     if('mediaSession' in navigator) try{navigator.mediaSession.metadata=new MediaMetadata({title:track.title,artist:track.ch||'',artwork:track.thumb?[{src:track.thumb}]:[]});}catch{}
-  } catch(error) { console.error(error); toast((track.source||'Источник')+': трек недоступен'); if(S.wave) { ytFailedSkips++; if(ytFailedSkips>=Math.max(3,ytQ.length)) { S.wave=false; save2(); updModes(); ytMessage('Найденные ссылки не воспроизводятся. Попробуй другой источник или загрузи MP3.'); ytSetPlaying(false); } else setTimeout(ytNextAutomatic,450); } }
+  } catch(error) { console.error('Telegram Beats playback error:', error); toast(error.message || ((track.source||'Источник')+': трек недоступен')); if(S.wave) { ytFailedSkips++; if(ytFailedSkips>=Math.max(3,ytQ.length)) { S.wave=false; save2(); updModes(); ytMessage('Найденные ссылки не воспроизводятся. Попробуй другой источник или загрузи MP3.'); ytSetPlaying(false); } else setTimeout(ytNextAutomatic,450); } }
 }
 async function ytNextAutomatic() {
   if(!ytMode) return;

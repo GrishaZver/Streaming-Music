@@ -134,30 +134,68 @@ async function searchVerome(query, limit, offset = 0) {
 }
 async function streamVerome(req, res, id) {
   if (!id || !/^[a-zA-Z0-9_-]{5,80}$/.test(id)) throw new HttpError(400, 'Некорректный ID YouTube Music');
-  const data = await fetchJson(`${VEROME_API}/api/stream?id=${encodeURIComponent(id)}`, 12000);
-  function findUrl(v) {
-    if (!v || typeof v !== 'object') return '';
-    if (typeof v === 'string') return /^https:\/\//i.test(v) ? v : '';
-    for (const key of ['audioUrl','audio_url','streamUrl','stream_url','url','proxyUrl','proxy_url']) {
-      if (typeof v[key] === 'string' && /^https:\/\//i.test(v[key])) return v[key];
+
+  // Verome versions may return either an audio response/redirect or JSON with a stream URL.
+  const endpoint = `${VEROME_API}/api/stream?id=${encodeURIComponent(id)}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 18000);
+  let response;
+  try {
+    response = await fetch(endpoint, {
+      method: req.method === 'HEAD' ? 'HEAD' : 'GET',
+      redirect: 'follow', signal: controller.signal,
+      headers: { 'User-Agent': 'Mozilla/5.0 TelegramBeats/1.0', Accept: 'audio/*,application/json;q=0.9,*/*;q=0.8', ...(req.headers.range ? { Range: req.headers.range } : {}) }
+    });
+  } catch (error) {
+    if (error.name === 'AbortError') throw new HttpError(504, 'Verome долго получает аудио. Попробуй ещё раз.');
+    throw new HttpError(502, `Не удалось получить аудио от Verome: ${error.message}`);
+  } finally { clearTimeout(timer); }
+
+  if (!response.ok && response.status !== 206) {
+    const detail = (await response.text().catch(() => '')).slice(0, 180);
+    throw new HttpError(502, `Verome не смог получить трек (HTTP ${response.status})${detail ? ': ' + detail : ''}`);
+  }
+
+  const contentType = (response.headers.get('content-type') || '').toLowerCase();
+  // If the endpoint already streams audio, relay it without trying to parse it as JSON.
+  if (contentType.startsWith('audio/') || contentType.includes('application/octet-stream') || contentType.includes('video/webm') || contentType.includes('video/mp4')) {
+    const outHeaders = { 'Content-Type': response.headers.get('content-type') || 'audio/mp4', 'Accept-Ranges': response.headers.get('accept-ranges') || 'bytes', 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*' };
+    for (const key of ['content-length','content-range','last-modified','etag']) { const value = response.headers.get(key); if (value) outHeaders[key] = value; }
+    res.writeHead(response.status, outHeaders);
+    if (req.method === 'HEAD' || !response.body) return res.end();
+    await pipeline(Readable.fromWeb(response.body), res);
+    return;
+  }
+
+  let data;
+  try { data = await response.json(); }
+  catch { throw new HttpError(502, `Verome вернул неподдерживаемый ответ (${contentType || 'неизвестный тип данных'}) вместо аудио`); }
+
+  function findUrl(value) {
+    if (typeof value === 'string') return /^https:\/\//i.test(value) ? value : '';
+    if (!value || typeof value !== 'object') return '';
+    for (const key of ['audioUrl','audio_url','streamUrl','stream_url','proxyUrl','proxy_url','url','src','link']) {
+      if (typeof value[key] === 'string' && /^https:\/\//i.test(value[key])) return value[key];
     }
-    for (const key of ['audio','stream','streams','formats','data','result','url']) {
-      const got = findUrl(v[key]); if (got) return got;
+    for (const key of ['audio','stream','streams','formats','data','result','results','content','url']) {
+      const found = findUrl(value[key]); if (found) return found;
     }
-    if (Array.isArray(v)) for (const item of v) { const got = findUrl(item); if (got) return got; }
+    if (Array.isArray(value)) for (const item of value) { const found = findUrl(item); if (found) return found; }
     return '';
   }
+
   const audioUrl = findUrl(data);
-  if (!audioUrl) throw new HttpError(502, 'Verome не вернул прямой аудиопоток для этого трека');
+  if (!audioUrl) throw new HttpError(502, 'Verome не вернул аудиопоток для этого трека. Попробуй другую песню.');
   const parsed = new URL(audioUrl);
-  const allowed = /(^|\.)googlevideo\.com$|(^|\.)youtube\.com$|(^|\.)piped\.video$|(^|\.)invidious\.io$|(^|\.)deno\.dev$|(^|\.)ytimg\.com$/i.test(parsed.hostname);
-  if (parsed.protocol !== 'https:' || !allowed) throw new HttpError(502, 'Источник вернул неподдерживаемый аудиохост');
+  const host = parsed.hostname.toLowerCase();
+  const allowed = /(^|\.)googlevideo\.com$|(^|\.)youtube\.com$|(^|\.)youtube-nocookie\.com$|(^|\.)piped\.video$|(^|\.)invidious\.io$|(^|\.)deno\.dev$|(^|\.)ytimg\.com$|(^|\.)kavin\.rocks$|(^|\.)adminforge\.de$|(^|\.)projectsegfau\.lt$/i.test(host);
+  if (parsed.protocol !== 'https:' || !allowed) throw new HttpError(502, `Verome вернул неподдерживаемый аудиохост: ${host}`);
   const headers = { 'User-Agent': 'Mozilla/5.0 TelegramBeats/1.0', Accept: req.headers.accept || 'audio/*,*/*;q=0.8' };
   if (req.headers.range) headers.Range = req.headers.range;
   const upstream = await fetch(parsed, { method: req.method === 'HEAD' ? 'HEAD' : 'GET', headers, redirect: 'follow' });
-  if (!upstream.ok && upstream.status !== 206) { await upstream.body?.cancel().catch(()=>{}); throw new HttpError(502, `Аудиоисточник ответил HTTP ${upstream.status}`); }
+  if (!upstream.ok && upstream.status !== 206) { await upstream.body?.cancel().catch(() => {}); throw new HttpError(502, `Аудиосервер ответил HTTP ${upstream.status}`); }
   const outHeaders = { 'Content-Type': upstream.headers.get('content-type') || 'audio/mp4', 'Accept-Ranges': upstream.headers.get('accept-ranges') || 'bytes', 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*' };
-  for (const key of ['content-length','content-range','last-modified','etag']) { const value=upstream.headers.get(key); if(value) outHeaders[key]=value; }
+  for (const key of ['content-length','content-range','last-modified','etag']) { const value = upstream.headers.get(key); if (value) outHeaders[key] = value; }
   res.writeHead(upstream.status, outHeaders);
   if (req.method === 'HEAD' || !upstream.body) return res.end();
   await pipeline(Readable.fromWeb(upstream.body), res);
