@@ -60,19 +60,23 @@ input[type=range]::-moz-range-thumb{width:15px;height:15px;border:0;border-radiu
 .times{display:flex;justify-content:space-between;font-size:11px;color:var(--hint);font-variant-numeric:tabular-nums}
 
 .main{display:flex;align-items:center;justify-content:space-between;padding:0 4px}
-.ic{font-size:21px;width:44px;height:44px;border-radius:50%;opacity:.55;transition:opacity .2s,color .2s,transform .1s;display:grid;place-items:center}
+.ic{font-size:21px;width:44px;height:44px;border-radius:50%;opacity:1;background:rgba(255,255,255,.09);border:1px solid rgba(255,255,255,.12);color:var(--text);transition:opacity .2s,color .2s,transform .1s,background .2s;display:grid;place-items:center}
 .ic:active{transform:scale(.9)}
-.ic.on{opacity:1;color:var(--accent)}
+.ic.on{opacity:1;color:#fff;background:var(--accent);border-color:var(--accent)}
 .ic.pp{opacity:1}
 .play{width:64px;height:64px;border-radius:50%;background:var(--accent);color:#fff;font-size:24px;
   display:grid;place-items:center;box-shadow:0 8px 24px color-mix(in srgb,var(--accent) 45%,transparent);transition:transform .12s,background .6s}
 .play:active{transform:scale(.93)}
 
 .tools{display:flex;justify-content:space-between;gap:6px;border-top:1px solid var(--line);padding-top:10px}
-.chip{font-size:13px;padding:7px 11px;border-radius:999px;background:rgba(255,255,255,.06);color:var(--text);white-space:nowrap;display:inline-flex;align-items:center;gap:6px}
+.chip{font-size:13px;padding:7px 11px;border-radius:999px;background:rgba(255,255,255,.10);border:1px solid rgba(255,255,255,.12);color:var(--text);white-space:nowrap;display:inline-flex;align-items:center;gap:6px;justify-content:center;min-height:36px}
 .svg{width:1em;height:1em;display:block;flex:none}.chip .svg{width:16px;height:16px}.play .svg{width:28px;height:28px}.thumb .svg{width:18px;height:18px}.mini .svg{width:18px;height:18px}
 .meta{cursor:pointer}.artist.hint{color:var(--accent)}
-.chip.on{background:color-mix(in srgb,var(--accent) 22%,transparent);color:var(--accent)}
+.chip.on{background:color-mix(in srgb,var(--accent) 28%,#17161b);border-color:color-mix(in srgb,var(--accent) 65%,transparent);color:#fff}
+.mini{min-width:34px;min-height:34px;border-radius:10px;background:rgba(255,255,255,.07);display:inline-grid;place-items:center}
+.mini:active,.chip:active{transform:scale(.96);filter:brightness(1.2)}
+.filters .search{border-color:rgba(255,255,255,.12)}
+select{border:1px solid rgba(255,255,255,.14);min-height:36px}
 
 /* Загрузка */
 .add{display:flex;align-items:center;justify-content:center;gap:8px;padding:13px;border-radius:var(--r);
@@ -387,7 +391,7 @@ $('list').addEventListener('click', async e => {
   const row = e.target.closest('.row'); if (!row) return;
   const id = +row.dataset.id, act = (e.target.closest('[data-act]') || {}).dataset?.act, t = S.tracks.find(x => x.id === id);
   if (act === 'edit') return openEdit(id);
-  if (act === 'fav') { t.fav = !t.fav; await save(t); haptic(); render(); }
+  if (act === 'fav') { t.fav = !t.fav; await save(t); syncLocalLikes(); haptic(); render(); renderYT(); }
   else if (act === 'del') {
     if (!t) return;
     let ok = false;
@@ -433,17 +437,7 @@ function setCover(t) {
   } else { l.style.backgroundImage = ''; l.classList.remove('has'); }
 }
 function togglePlay() {
-  if (ytMode) {
-    if (audio.paused) {
-      const attempt = audio.play();
-      if (attempt && typeof attempt.catch === 'function') attempt.catch(err => {
-        console.warn('Remote playback failed:', err);
-        ytSetPlaying(false);
-        toast(err && err.name === 'NotAllowedError' ? 'Браузер заблокировал запуск. Нажми ▶ ещё раз.' : 'Не удалось запустить поток. Проверь источник.');
-      });
-    } else audio.pause();
-    return;
-  }
+  if (ytMode) { audio.paused ? audio.play().catch(() => {}) : audio.pause(); return; }
   if (!S.tracks.length) return $('file').click();
   const v = view();
   if (S.cur == null) return v.length && play(v[0].id);
@@ -499,7 +493,7 @@ audio.onloadedmetadata = () => {   // длительность для стары
   updatePos();
 };
 audio.onended = () => { if (ytMode) { if (S.repeat === 2) { audio.currentTime = 0; audio.play().catch(() => {}); } else ytNextAutomatic(); return; } if (S.repeat === 2) { audio.currentTime = 0; audio.play(); } else step(1, true); };
-audio.onerror = () => { if (ytMode) { const code = audio.error?.code || 0; const reason = code === 2 ? 'сетевая ошибка' : code === 3 ? 'ошибка декодирования' : code === 4 ? 'формат не поддерживается' : 'источник не отдал аудио'; toast('Не удалось воспроизвести: ' + reason); ytSetPlaying(false); if(S.wave) { ytFailedSkips++; if(ytFailedSkips>=Math.max(3,ytQ.length)) { S.wave=false; save2(); updModes(); ytMessage('Поиск работает, но источники не отдали воспроизводимый аудиопоток (' + reason + '). Проверьте /api/health и логи Render.'); ytSetPlaying(false); } else setTimeout(ytNextAutomatic,500); } else ytMessage('Трек найден, но аудио не загрузилось: ' + reason + '. Попробуй другой трек.'); return; } if (S.cur != null) { toast('Файл не открывается — пропускаю'); setTimeout(() => step(1, true), 600); } };
+audio.onerror = () => { if (ytMode) { toast('Поток недоступен'); ytSetPlaying(false); if(S.wave) { ytFailedSkips++; if(ytFailedSkips>=Math.max(3,ytQ.length)) { S.wave=false; save2(); updModes(); ytMessage('Источники вернули ссылки, но аудио не воспроизводится. Попробуй другой интернет или загрузи MP3.'); ytSetPlaying(false); } else setTimeout(ytNextAutomatic,500); } return; } if (S.cur != null) { toast('Файл не открывается — пропускаю'); setTimeout(() => step(1, true), 600); } };
 $('seek').oninput = e => {
   if (audio.duration) audio.currentTime = e.target.value / 1000 * audio.duration;
 };
@@ -608,6 +602,11 @@ const K2 = ['eq', 'fade', 'norm', 'lessAI', 'kids', 'wave', 'pl', 'playlists', '
 Object.assign(S, { eq: [0, 0, 0, 0, 0], fade: true, norm: false, lessAI: false, kids: false, wave: false, pl: '', playlists: {}, ytLiked: [], ytDis: [] });
 function load2() { try { const j = JSON.parse(localStorage.getItem('beats2')) || {}; K2.forEach(k => { if (k in j) S[k] = j[k]; }); } catch {} }
 function save2() { try { localStorage.setItem('beats2', JSON.stringify(Object.fromEntries(K2.map(k => [k, S[k]])))); } catch {} }
+function syncLocalLikes() {
+  const localLikes = (S.tracks || []).filter(t => t.fav).map(t => ({id:'local:'+t.id, source:'local', sourceId:String(t.id), title:t.title || t.name || 'Без названия', ch:t.artist || 'Моя библиотека', thumb:t.cover ? (t._thumb || (t._thumb=URL.createObjectURL(t.cover))) : '', duration:Number(t.duration || 0), url:''}));
+  S.ytLiked = [...(S.ytLiked || []).filter(t => t.source !== 'local' && !String(t.id).startsWith('local:')), ...localLikes];
+  save2();
+}
 const AI_RE = /(^|[^a-zа-яё0-9])(ai|suno|udio|ии|нейро\w*|neural)([^a-zа-яё0-9]|$)/i;   // эвристика по словам в названии
 function upd2() {
   $('wave').classList.toggle('on', S.wave); $('lessAI').classList.toggle('on', S.lessAI); $('kids').classList.toggle('on', S.kids);
@@ -785,7 +784,7 @@ async function ytRefillWave(start=false) {
   } catch(error) { S.wave=false; save2(); updModes(); ytMessage((error.name==='AbortError'||/тайм-аут/i.test(error.message||''))?'Источник не ответил вовремя. Попробуй ещё раз или добавь MP3-файлы.':(error.message||'Не удалось подобрать музыку')); toast('Поиск завершён: музыка не найдена'); }
   finally { ytWaveLoading=false; }
 }
-function resolveStream(track) {
+async function resolveStream(track) {
   if(track.source==='local') { const local=S.tracks.find(t=>String(t.id)===track.sourceId); if(!local) throw new Error('Файл удалён из библиотеки'); return URL.createObjectURL(local.file); }
   if(track.source==='archive' || track.source==='audius') {
     const params = new URLSearchParams({provider:track.source, id:track.sourceId});
@@ -802,31 +801,23 @@ async function ytPlay(index) {
   $('cur').textContent='0:00'; $('dur').textContent=track.duration?fmt(track.duration):'0:00'; $('seek').value=0; $('seek').style.setProperty('--p','0%');
   $('label').style.backgroundImage=track.thumb?`url("${track.thumb}")`:''; $('label').classList.toggle('has',!!track.thumb); renderYT();
   try {
-    // Build the URL synchronously and call play() before the first await.
-    // This preserves the user's tap on mobile browsers, which otherwise may block playback.
-    const streamUrl = resolveStream(track);
-    audio.removeAttribute('crossorigin');
-    audio.muted = false;
-    if (audio.volume === 0) audio.volume = 1;
-    audio.src = streamUrl;
-    audio.load();
-    const playAttempt = audio.play();
-    if (playAttempt && typeof playAttempt.then === 'function') {
-      try {
-        await playAttempt;
-        if (ac && ac.state === 'suspended') ac.resume().catch(err => console.warn('AudioContext resume:', err));
-        ytSetPlaying(true);
-      } catch (err) {
-        console.warn('Playback was blocked:', err);
-        ytSetPlaying(false);
-        ytMessage(err && err.name === 'NotAllowedError'
-          ? 'Трек найден. Нажми большую кнопку ▶ ещё раз — браузер блокирует автоматический запуск.'
-          : 'Трек найден, но поток не запустился. Попробуй следующий трек.');
-        toast(err && err.name === 'NotAllowedError' ? 'Нажми ▶, чтобы разрешить воспроизведение.' : 'Не удалось запустить аудио');
-      }
+    const streamUrl=await Promise.race([
+      resolveStream(track),
+      new Promise((_,reject)=>setTimeout(()=>reject(new Error('Источник не выдал аудио за 8 секунд')),8000))
+    ]);
+    // Do not force CORS mode for remote audio: some otherwise playable archive streams omit CORS headers.
+    audio.removeAttribute('crossorigin'); audio.muted = false; if (audio.volume === 0) audio.volume = 1; audio.src=streamUrl; audio.load();
+    try {
+      await audio.play();
+      if (ac && ac.state === 'suspended') await ac.resume();
+      ytSetPlaying(true);
+    } catch (err) {
+      console.warn('Playback was blocked:', err);
+      toast('Нажми ▶, чтобы разрешить воспроизведение.');
+      ytSetPlaying(false);
     }
     if('mediaSession' in navigator) try{navigator.mediaSession.metadata=new MediaMetadata({title:track.title,artist:track.ch||'',artwork:track.thumb?[{src:track.thumb}]:[]});}catch{}
-  } catch(error) { console.error(error); toast((track.source||'Источник')+': трек недоступен'); if(S.wave) { ytFailedSkips++; if(ytFailedSkips>=Math.max(3,ytQ.length)) { S.wave=false; save2(); updModes(); ytMessage('Не удалось подготовить аудиопоток. Проверь /api/health и логи Render.'); ytSetPlaying(false); } else setTimeout(ytNextAutomatic,450); } }
+  } catch(error) { console.error(error); toast((track.source||'Источник')+': трек недоступен'); if(S.wave) { ytFailedSkips++; if(ytFailedSkips>=Math.max(3,ytQ.length)) { S.wave=false; save2(); updModes(); ytMessage('Найденные ссылки не воспроизводятся. Попробуй другой источник или загрузи MP3.'); ytSetPlaying(false); } else setTimeout(ytNextAutomatic,450); } }
 }
 async function ytNextAutomatic() {
   if(!ytMode) return;
@@ -859,12 +850,12 @@ function renderYT() {
 $('ytlist').addEventListener('click',event=>{
   const row=event.target.closest('.row');if(!row)return;const track=ytQ.find(item=>item.id===row.dataset.id);if(!track)return;
   const action=event.target.closest('[data-act]')?.dataset.act;
-  if(action==='like'){const index=S.ytLiked.findIndex(item=>item.id===track.id);if(index<0)S.ytLiked.push(track);else S.ytLiked.splice(index,1);save2();haptic();renderYT();return;}
+  if(action==='like'){if(track.source==='local'){const local=S.tracks.find(t=>String(t.id)===track.sourceId);if(local){local.fav=!local.fav;save(local).then(()=>{syncLocalLikes();render();renderYT();});}}else{const index=S.ytLiked.findIndex(item=>item.id===track.id);if(index<0)S.ytLiked.push({...track});else S.ytLiked.splice(index,1);save2();renderYT();}haptic();return;}
   if(action==='dis'){if(!S.ytDis.includes(track.id))S.ytDis.push(track.id);save2();const wasPlaying=ytQ[ytIdx]?.id===track.id;renderYT();if(wasPlaying){audio.pause();if(S.wave)ytNextAutomatic();else toast('Трек скрыт из рекомендаций');}return;}
   ytPlay(ytQ.findIndex(item=>item.id===track.id));
 });
 $('ytGo').onclick=ytSearch;$('ytq').onkeydown=event=>{if(event.key==='Enter')ytSearch();};
-$('ytLikes').onclick=()=>{ytQ=[...S.ytLiked].filter(ytTrackAllowed);ytIdx=-1;S.wave=false;save2();updModes();renderYT();};
+$('ytLikes').onclick=()=>{syncLocalLikes();ytQ=[...S.ytLiked].filter(ytTrackAllowed);ytIdx=-1;S.wave=false;save2();updModes();renderYT();$('ytlist').scrollIntoView({behavior:'smooth',block:'nearest'});};
 /* ---------- старт ---------- */
 (async function init() {
   const p = loadPrefs();
@@ -874,7 +865,7 @@ $('ytLikes').onclick=()=>{ytQ=[...S.ytLiked].filter(ytTrackAllowed);ytIdx=-1;S.w
     db = await openDB();
     S.tracks = (await tx('readonly', s => s.getAll())).map(normalize);
   } catch (e) { toast('Не удалось открыть хранилище'); console.error(e); }
-  render();
+  render(); syncLocalLikes(); renderYT();
   if (p.cur != null && S.tracks.some(t => t.id === p.cur)) await play(p.cur, { auto: false, at: p.pos || 0 });
 })();
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
