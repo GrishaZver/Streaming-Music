@@ -177,7 +177,7 @@ async function streamVerome(req, res, id) {
     for (const key of ['audioUrl','audio_url','streamUrl','stream_url','proxyUrl','proxy_url','url','src','link']) {
       if (typeof value[key] === 'string' && /^https:\/\//i.test(value[key])) return value[key];
     }
-    for (const key of ['audio','stream','streams','formats','data','result','results','content','url']) {
+    for (const key of ['audio','stream','streams','streamingUrls','streaming_urls','formats','data','result','results','content','url']) {
       const found = findUrl(value[key]); if (found) return found;
     }
     if (Array.isArray(value)) for (const item of value) { const found = findUrl(item); if (found) return found; }
@@ -188,7 +188,7 @@ async function streamVerome(req, res, id) {
   if (!audioUrl) throw new HttpError(502, 'Verome не вернул аудиопоток для этого трека. Попробуй другую песню.');
   const parsed = new URL(audioUrl);
   const host = parsed.hostname.toLowerCase();
-  const allowed = /(^|\.)googlevideo\.com$|(^|\.)youtube\.com$|(^|\.)youtube-nocookie\.com$|(^|\.)piped\.video$|(^|\.)invidious\.io$|(^|\.)deno\.dev$|(^|\.)ytimg\.com$|(^|\.)kavin\.rocks$|(^|\.)adminforge\.de$|(^|\.)projectsegfau\.lt$/i.test(host);
+  const allowed = /(^|\.)googlevideo\.com$|(^|\.)youtube\.com$|(^|\.)youtube-nocookie\.com$|(^|\.)piped\.video$|(^|\.)invidious\.io$|(^|\.)deno\.dev$|(^|\.)ytimg\.com$|(^|\.)kavin\.rocks$|(^|\.)adminforge\.de$|(^|\.)projectsegfau\.lt$|(^|\.)private\.coffee$|(^|\.)darkness\.services$|(^|\.)r4fo\.com$|(^|\.)piped\.yt$|(^|\.)leptons\.xyz$|(^|\.)omada\.cafe$|(^|\.)nadeko\.net$|(^|\.)y\.com\.sb$/i.test(host);
   if (parsed.protocol !== 'https:' || !allowed) throw new HttpError(502, `Verome вернул неподдерживаемый аудиохост: ${host}`);
   const headers = { 'User-Agent': 'Mozilla/5.0 TelegramBeats/1.0', Accept: req.headers.accept || 'audio/*,*/*;q=0.8' };
   if (req.headers.range) headers.Range = req.headers.range;
@@ -265,21 +265,7 @@ async function health() {
     fetchJson('https://discoveryprovider.audius.co/v1/tracks/trending?app_name=' + APP_NAME + '&time=week&limit=1', 4500)
   ]);
   const providers = { youtubeMusic: checks[0].status === 'fulfilled', audius: checks[1].status === 'fulfilled' };
-  // Include safe, short diagnostics so /api/health explains which upstream failed.
-  const errors = {};
-  for (const [name, result] of [['youtubeMusic', checks[0]], ['audius', checks[1]]]) {
-    if (result.status === 'rejected') {
-      const reason = result.reason;
-      errors[name] = String(reason?.message || reason || 'Источник не ответил').slice(0, 180);
-    }
-  }
-  return {
-    ok: Object.values(providers).some(Boolean),
-    providers,
-    errors,
-    veromeApi: VEROME_API,
-    message: Object.values(providers).some(Boolean) ? 'Хотя бы один музыкальный источник доступен' : 'Сервер работает, но музыкальные источники не отвечают'
-  };
+  return { ok: Object.values(providers).some(Boolean), providers, message: Object.values(providers).some(Boolean) ? 'Хотя бы один музыкальный источник доступен' : 'Сервер работает, но музыкальные источники не отвечают' };
 }
 const server = http.createServer(async (req, res) => {
   try {
