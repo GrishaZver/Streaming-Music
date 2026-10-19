@@ -881,7 +881,7 @@ $('ytLikes').onclick=()=>{syncLocalLikes();ytQ=[...S.ytLiked].filter(ytTrackAllo
 (async function init() {
   const p = loadPrefs();
   Object.assign(S, { shuffle: !!p.shuffle, repeat: p.repeat || 0, rate: RATES.includes(p.rate) ? p.rate : 1, sort: p.sort || 'added', favOnly: !!p.favOnly });
-  load2(); sourceLoadSettings(); paint(); setDrop(DROP_TXT); renderPl(); buildEq(); updModes(); renderYT();
+  load2(); paint(); setDrop(DROP_TXT); renderPl(); buildEq(); updModes(); renderYT();
   try {
     db = await openDB();
     S.tracks = (await tx('readonly', s => s.getAll())).map(normalize);
