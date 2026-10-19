@@ -265,7 +265,21 @@ async function health() {
     fetchJson('https://discoveryprovider.audius.co/v1/tracks/trending?app_name=' + APP_NAME + '&time=week&limit=1', 4500)
   ]);
   const providers = { youtubeMusic: checks[0].status === 'fulfilled', audius: checks[1].status === 'fulfilled' };
-  return { ok: Object.values(providers).some(Boolean), providers, message: Object.values(providers).some(Boolean) ? 'Хотя бы один музыкальный источник доступен' : 'Сервер работает, но музыкальные источники не отвечают' };
+  // Include safe, short diagnostics so /api/health explains which upstream failed.
+  const errors = {};
+  for (const [name, result] of [['youtubeMusic', checks[0]], ['audius', checks[1]]]) {
+    if (result.status === 'rejected') {
+      const reason = result.reason;
+      errors[name] = String(reason?.message || reason || 'Источник не ответил').slice(0, 180);
+    }
+  }
+  return {
+    ok: Object.values(providers).some(Boolean),
+    providers,
+    errors,
+    veromeApi: VEROME_API,
+    message: Object.values(providers).some(Boolean) ? 'Хотя бы один музыкальный источник доступен' : 'Сервер работает, но музыкальные источники не отвечают'
+  };
 }
 const server = http.createServer(async (req, res) => {
   try {
