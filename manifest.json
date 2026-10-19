@@ -1,0 +1,8 @@
+{
+  "name": "Telegram Beats",
+  "short_name": "Beats",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0c0b0f",
+  "theme_color": "#0c0b0f"
+}

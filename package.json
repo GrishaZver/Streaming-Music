@@ -1,0 +1,8 @@
+{
+  "name": "telegram-beats-self-hosted",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Telegram Beats music player with a small streaming/search backend",
+  "scripts": { "start": "node server.js" },
+  "engines": { "node": ">=20" }
+}
