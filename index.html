@@ -467,7 +467,10 @@ const skip = s => {
 
 audio.onplay = audio.onpause = () => {
   const on = !audio.paused;
-  if (on) { initAudio(); if (ac) ac.resume(); try { yt && yt.pauseVideo(); } catch {} }
+  // Keep native HTMLAudio playback as the default. Creating a WebAudio graph
+  // automatically can route audio into a suspended AudioContext and make it silent
+  // on mobile browsers. EQ is enabled explicitly when the user opens it.
+  if (on) { if (ac && ac.state === 'suspended') ac.resume().catch(() => {}); try { yt && yt.pauseVideo(); } catch {} }
   $('play').innerHTML = I(on ? 'pause' : 'play'); $('disc').classList.toggle('on', on); $('app').classList.toggle('playing', on);
   if ('mediaSession' in navigator) navigator.mediaSession.playbackState = on ? 'playing' : 'paused';
   if (!ytMode) savePrefs();
@@ -486,7 +489,7 @@ audio.onloadedmetadata = () => {   // длительность для стары
   updatePos();
 };
 audio.onended = () => { if (ytMode) { if (S.repeat === 2) { audio.currentTime = 0; audio.play().catch(() => {}); } else ytNextAutomatic(); return; } if (S.repeat === 2) { audio.currentTime = 0; audio.play(); } else step(1, true); };
-audio.onerror = () => { if (ytMode) { toast('Поток недоступен'); if(S.wave) { ytFailedSkips++; if(ytFailedSkips>=Math.max(3,ytQ.length)) { S.wave=false; save2(); updModes(); ytMessage('Источники вернули ссылки, но аудио не воспроизводится. Попробуй другой интернет или загрузи MP3.'); ytSetPlaying(false); } else setTimeout(ytNextAutomatic,500); } return; } if (S.cur != null) { toast('Файл не открывается — пропускаю'); setTimeout(() => step(1, true), 600); } };
+audio.onerror = () => { if (ytMode) { toast('Поток недоступен'); ytSetPlaying(false); if(S.wave) { ytFailedSkips++; if(ytFailedSkips>=Math.max(3,ytQ.length)) { S.wave=false; save2(); updModes(); ytMessage('Источники вернули ссылки, но аудио не воспроизводится. Попробуй другой интернет или загрузи MP3.'); ytSetPlaying(false); } else setTimeout(ytNextAutomatic,500); } return; } if (S.cur != null) { toast('Файл не открывается — пропускаю'); setTimeout(() => step(1, true), 600); } };
 $('seek').oninput = e => {
   if (audio.duration) audio.currentTime = e.target.value / 1000 * audio.duration;
 };
@@ -637,7 +640,10 @@ function buildEq() {
   Object.entries(PRES).forEach(([n, v]) => { const b = document.createElement('button'); b.className = 'chip'; b.textContent = n; b.onclick = () => { S.eq = [...v]; eqN.forEach((x, i) => x.gain.value = v[i]); buildEq(); save2(); }; P2.appendChild(b); });
   $('fadeCk').checked = S.fade; $('normCk').checked = S.norm;
 }
-$('eqBtn').onclick = () => { $('eqModal').hidden = false; };
+$('eqBtn').onclick = async () => {
+  try { initAudio(); if (ac && ac.state === 'suspended') await ac.resume(); } catch (e) { console.warn('EQ audio context:', e); }
+  $('eqModal').hidden = false;
+};
 $('eqClose').onclick = () => { $('eqModal').hidden = true; };
 $('eqModal').onclick = e => { if (e.target === $('eqModal')) $('eqModal').hidden = true; };
 $('fadeCk').onchange = e => { S.fade = e.target.checked; save2(); };
@@ -791,13 +797,16 @@ async function ytPlay(index) {
       new Promise((_,reject)=>setTimeout(()=>reject(new Error('Источник не выдал аудио за 8 секунд')),8000))
     ]);
     // Do not force CORS mode for remote audio: some otherwise playable archive streams omit CORS headers.
-    audio.removeAttribute('crossorigin'); audio.src=streamUrl; audio.load();
-    const playResult = audio.play();
-    if (playResult && typeof playResult.catch === 'function') playResult.catch(err => {
+    audio.removeAttribute('crossorigin'); audio.muted = false; if (audio.volume === 0) audio.volume = 1; audio.src=streamUrl; audio.load();
+    try {
+      await audio.play();
+      if (ac && ac.state === 'suspended') await ac.resume();
+      ytSetPlaying(true);
+    } catch (err) {
       console.warn('Playback was blocked:', err);
-      toast('Браузер заблокировал запуск. Нажми ▶ для воспроизведения.');
+      toast('Нажми ▶, чтобы разрешить воспроизведение.');
       ytSetPlaying(false);
-    });
+    }
     if('mediaSession' in navigator) try{navigator.mediaSession.metadata=new MediaMetadata({title:track.title,artist:track.ch||'',artwork:track.thumb?[{src:track.thumb}]:[]});}catch{}
   } catch(error) { console.error(error); toast((track.source||'Источник')+': трек недоступен'); if(S.wave) { ytFailedSkips++; if(ytFailedSkips>=Math.max(3,ytQ.length)) { S.wave=false; save2(); updModes(); ytMessage('Найденные ссылки не воспроизводятся. Попробуй другой источник или загрузи MP3.'); ytSetPlaying(false); } else setTimeout(ytNextAutomatic,450); } }
 }
