@@ -195,6 +195,7 @@ select{background:rgba(255,255,255,.06);color:var(--text);border:0;border-radius
       </div>
     </details>
     <div class="list" id="ytlist"></div>
+    <div class="filters" style="justify-content:center;padding-top:8px"><button class="chip" id="ytMore" type="button" hidden>Загрузить ещё песни</button><span id="ytPageStatus" class="source-note"></span></div>
   </section>
 </div>
 <div class="modal" id="modal" hidden>
@@ -688,6 +689,7 @@ $('plClose').onclick = () => { $('plModal').hidden = true; };
 
 /* ---------- Мульти-источник: Audius + Internet Archive + Jamendo ---------- */
 let ytQ = [], ytIdx = -1, yt = null, ytReady = null;
+let ytQuery = '', ytOffset = 0, ytMoreLoading = false;
 let ytPlayerReadyPromise = null, ytSearchToken = 0, ytMode = false, ytWaveLoading = false, ytFailedSkips = 0;
 const ytSeeds = [
   'popular', 'pop', 'indie', 'dance', 'rock', 'chill electronic',
@@ -731,7 +733,7 @@ $('ytTest').onclick = async () => {
   try { const result = await apiJson('/api/health', 12000); const labels = Object.entries(result.providers || {}).map(([name, ok]) => name + ': ' + (ok ? 'доступен' : 'нет ответа')); status.textContent = labels.join(' · ') || result.message || 'Проверка завершена'; }
   catch (error) { status.textContent = error.message; }
 };
-async function fetchAllSources(query, limit=25, includeAllLocal=false, wave=false) {
+async function fetchAllSources(query, limit=25, includeAllLocal=false, wave=false, offset=0) {
   const localTracks = fetchLocal(query, includeAllLocal);
   if (location.protocol === 'file:') {
     if (localTracks.length) return mix(localTracks).slice(0, limit);
@@ -739,7 +741,7 @@ async function fetchAllSources(query, limit=25, includeAllLocal=false, wave=fals
   }
   let remote = []; let sourceErrors = [];
   try {
-    const params = new URLSearchParams({query:String(query || ''), limit:String(limit), wave:wave?'1':'0'});
+    const params = new URLSearchParams({query:String(query || ''), limit:String(limit), offset:String(offset), wave:wave?'1':'0'});
     const data = await apiJson('/api/search?' + params.toString(), 22000);
     remote = Array.isArray(data.tracks) ? data.tracks : []; sourceErrors = Array.isArray(data.errors) ? data.errors : [];
   } catch (error) {
@@ -758,17 +760,35 @@ function fetchLocal(query, includeAll=false) {
 }
 async function ytSearch() {
   const query=$('ytq').value.trim(); if(!query) return toast('Введи название песни или исполнителя');
-  const token=++ytSearchToken; ytMessage(location.protocol==='file:'?'Проверяю библиотеку. Онлайн-поиск из локального HTML может блокироваться браузером…':'Ищу музыку в Audius и Internet Archive…');
+  const token=++ytSearchToken; ytQuery=query; ytOffset=0; ytQ=[]; ytIdx=-1; S.wave=false;
+  $('ytMore').hidden=true; $('ytPageStatus').textContent='';
+  ytMessage(location.protocol==='file:'?'Проверяю библиотеку. Онлайн-поиск из локального HTML может блокироваться браузером…':'Ищу в YouTube Music и Audius…');
   try {
-    const found=await fetchAllSources(S.kids?query+' children songs':query,36,false,false);
+    const found=await fetchAllSources(S.kids?query+' children songs':query,30,false,false,0);
     if(token!==ytSearchToken) return;
-    ytQ=found; ytIdx=-1; S.wave=false; save2(); updModes(); renderYT();
-    if(!ytQ.length) ytMessage('Ничего не найдено. Проверь запрос, интернет или добавь MP3-файлы.');
+    ytQ=found; ytOffset=found.length; save2(); updModes(); renderYT();
+    $('ytMore').hidden=found.length===0; $('ytPageStatus').textContent=found.length?'Найдено: '+found.length:'';
+    if(!ytQ.length) ytMessage('Ничего не найдено. Попробуй запрос без лишних слов или другой вариант названия.');
   } catch(error) { if(token===ytSearchToken) ytMessage(error.message||'Не удалось найти музыку'); }
 }
+async function ytLoadMore() {
+  if(ytMoreLoading||!ytQuery||S.wave) return;
+  ytMoreLoading=true; const token=ytSearchToken; $('ytMore').disabled=true; $('ytMore').textContent='Загружаю…';
+  try {
+    const found=await fetchAllSources(S.kids?ytQuery+' children songs':ytQuery,30,false,false,ytOffset);
+    if(token!==ytSearchToken) return;
+    const existing=new Set(ytQ.map(t=>t.id)); const fresh=found.filter(t=>!existing.has(t.id));
+    ytQ.push(...fresh); ytOffset+=30; renderYT();
+    $('ytPageStatus').textContent='Показано: '+ytQ.length;
+    $('ytMore').hidden=found.length<30||fresh.length===0;
+    if(!fresh.length) $('ytPageStatus').textContent='Больше уникальных песен не найдено. Попробуй другой запрос.';
+  } catch(error) { $('ytPageStatus').textContent=error.message||'Не удалось загрузить следующую страницу'; }
+  finally { ytMoreLoading=false; $('ytMore').disabled=false; $('ytMore').textContent='Загрузить ещё песни'; }
+}
+$('ytMore').onclick=ytLoadMore;
 async function ytStartWave() {
   ytFailedSkips=0; S.wave=true; S.shuffle=false; save2(); updModes(); ytQ=[]; ytIdx=-1; ytWaveLoading=false;
-  ytMessage(location.protocol==='file:'?'Проверяю локальную библиотеку…':'Ищу музыку в Audius и Internet Archive…'); await ytRefillWave(true);
+  ytMessage(location.protocol==='file:'?'Проверяю локальную библиотеку…':'Ищу в YouTube Music и Audius…'); await ytRefillWave(true);
 }
 async function ytRefillWave(start=false) {
   if(!S.wave||ytWaveLoading) return; ytWaveLoading=true;
@@ -786,6 +806,7 @@ async function ytRefillWave(start=false) {
 }
 async function resolveStream(track) {
   if(track.source==='local') { const local=S.tracks.find(t=>String(t.id)===track.sourceId); if(!local) throw new Error('Файл удалён из библиотеки'); return URL.createObjectURL(local.file); }
+  if(track.source==='verome') return '/api/stream?provider=verome&id=' + encodeURIComponent(track.sourceId);
   if(track.source==='archive' || track.source==='audius') {
     const params = new URLSearchParams({provider:track.source, id:track.sourceId});
     if (track.fileName) params.set('file', track.fileName);
@@ -797,7 +818,7 @@ async function resolveStream(track) {
 async function ytPlay(index) {
   if(index<0||index>=ytQ.length) return; const track=ytQ[index]; if(!track) return;
   ytIdx=index; ytMode=true; audio.pause(); if(objURL){URL.revokeObjectURL(objURL);objURL=null;}
-  $('title').textContent=track.title; $('artist').textContent=(track.ch||'Неизвестный исполнитель')+' · '+track.source;
+  $('title').textContent=track.title; $('artist').textContent=(track.ch||'Неизвестный исполнитель')+' · '+(track.source==='verome'?'YouTube Music':track.source==='audius'?'Audius':track.source);
   $('cur').textContent='0:00'; $('dur').textContent=track.duration?fmt(track.duration):'0:00'; $('seek').value=0; $('seek').style.setProperty('--p','0%');
   $('label').style.backgroundImage=track.thumb?`url("${track.thumb}")`:''; $('label').classList.toggle('has',!!track.thumb); renderYT();
   try {
@@ -842,7 +863,7 @@ function renderYT() {
     const row=document.createElement('div'); row.className='row'+(ytQ[ytIdx]?.id===track.id?' cur':''); row.dataset.id=track.id;
     const thumb=document.createElement('div');thumb.className='thumb';if(track.thumb)thumb.style.backgroundImage=`url("${track.thumb}")`;else thumb.innerHTML=I('music');
     const info=document.createElement('div');info.className='inf';const name=document.createElement('div');name.className='n';name.textContent=track.title;
-    const artist=document.createElement('div');artist.className='a';artist.textContent=(track.ch||'Неизвестный исполнитель')+' · '+track.source;info.append(name,artist);
+    const artist=document.createElement('div');artist.className='a';artist.textContent=(track.ch||'Неизвестный исполнитель')+' · '+(track.source==='verome'?'YouTube Music':track.source==='audius'?'Audius':track.source);info.append(name,artist);
     const like=document.createElement('button');like.className='mini fav';like.dataset.act='like';like.setAttribute('aria-label','В избранное');like.innerHTML=I('heart',S.ytLiked.some(item=>item.id===track.id)?'currentColor':'none');
     const dislike=document.createElement('button');dislike.className='mini';dislike.dataset.act='dis';dislike.setAttribute('aria-label','Не рекомендовать');dislike.innerHTML=I('thumbdown');row.append(thumb,info,like,dislike);fragment.appendChild(row);
   }); list.appendChild(fragment);
@@ -860,7 +881,7 @@ $('ytLikes').onclick=()=>{syncLocalLikes();ytQ=[...S.ytLiked].filter(ytTrackAllo
 (async function init() {
   const p = loadPrefs();
   Object.assign(S, { shuffle: !!p.shuffle, repeat: p.repeat || 0, rate: RATES.includes(p.rate) ? p.rate : 1, sort: p.sort || 'added', favOnly: !!p.favOnly });
-  load2(); paint(); setDrop(DROP_TXT); renderPl(); buildEq(); updModes(); renderYT();
+  load2(); sourceLoadSettings(); paint(); setDrop(DROP_TXT); renderPl(); buildEq(); updModes(); renderYT();
   try {
     db = await openDB();
     S.tracks = (await tx('readonly', s => s.getAll())).map(normalize);

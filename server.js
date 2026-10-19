@@ -13,7 +13,8 @@ const AUDIUS_NODES = [
   'https://discoveryprovider.audius.co/v1',
   'https://api.audius.co/v1'
 ];
-const AUDIO_EXT = /\.(mp3|m4a|aac|ogg|oga|opus|flac|wav)$/i;
+const VEROME_API = process.env.VEROME_API_URL || 'https://verome-api.deno.dev';
+let ytMusicApiPromise = null;
 
 class HttpError extends Error { constructor(status, message) { super(message); this.status = status; } }
 function json(res, status, data) {
@@ -57,13 +58,14 @@ function asTrack(source, item) {
 function safeWords(query) {
   return String(query || '').normalize('NFKD').replace(/[^\p{L}\p{N}\s-]/gu, ' ').trim().split(/\s+/).filter(Boolean).slice(0, 5);
 }
-async function searchAudius(query, limit) {
+async function searchAudius(query, limit, offset = 0) {
   let lastError;
   for (const base of AUDIUS_NODES) {
     try {
       let url = new URL(base + (query ? '/tracks/search' : '/tracks/trending'));
       url.searchParams.set('app_name', APP_NAME);
       url.searchParams.set('limit', String(Math.max(1, Math.min(limit, 25))));
+      if (offset > 0) url.searchParams.set('offset', String(offset));
       if (query) url.searchParams.set('query', query);
       else url.searchParams.set('time', 'week');
       let data = await fetchJson(url.toString(), 6500);
@@ -84,48 +86,94 @@ async function searchAudius(query, limit) {
   }
   throw lastError || new Error('Audius недоступен');
 }
-async function searchArchive(query, limit) {
-  const words = safeWords(query);
-  let term = 'mediatype:audio AND (title:music OR subject:music OR title:live OR subject:audio)';
-  if (words.length) {
-    const clauses = words.map(word => `(title:${word} OR creator:${word} OR subject:${word})`);
-    term = 'mediatype:audio AND (' + clauses.join(' OR ') + ')';
+function pickArray(value) {
+  if (Array.isArray(value)) return value;
+  if (!value || typeof value !== 'object') return [];
+  for (const key of ['songs', 'tracks', 'results', 'items', 'content', 'data']) {
+    const candidate = value[key];
+    if (Array.isArray(candidate)) return candidate;
+    if (candidate && typeof candidate === 'object') {
+      const nested = pickArray(candidate);
+      if (nested.length) return nested;
+    }
   }
-  const url = new URL('https://archive.org/advancedsearch.php');
-  url.searchParams.set('q', term);
-  for (const field of ['identifier', 'title', 'creator']) url.searchParams.append('fl[]', field);
-  url.searchParams.set('rows', String(Math.min(Math.max(limit, 4), 12)));
-  url.searchParams.set('page', '1'); url.searchParams.set('output', 'json');
-  url.searchParams.append('sort[]', 'downloads desc');
-  const result = await fetchJson(url.toString(), 8000);
-  const docs = result.response?.docs || [];
-  const tracks = await Promise.all(docs.slice(0, Math.min(limit, 8)).map(async doc => {
-    try {
-      const metadata = await fetchJson('https://archive.org/metadata/' + encodeURIComponent(doc.identifier), 7000);
-      const files = (metadata.files || []).filter(file => AUDIO_EXT.test(file.name || '') && !String(file.name).includes('/') && file.name !== '__ia_thumb.jpg');
-      files.sort((a, b) => {
-        const score = file => (/\.mp3$/i.test(file.name) ? 5 : /\.m4a$/i.test(file.name) ? 4 : /\.ogg$/i.test(file.name) ? 3 : /\.flac$/i.test(file.name) ? 2 : 1) + (file.source === 'original' ? 0.2 : 0);
-        return score(b) - score(a);
-      });
-      const file = files[0];
-      if (!file) return null;
-      const creator = Array.isArray(doc.creator) ? doc.creator.join(', ') : (doc.creator || 'Internet Archive');
-      return asTrack('archive', { id: doc.identifier, fileName: file.name, title: doc.title || doc.identifier, ch: creator, duration: file.duration, thumb: `https://archive.org/services/img/${encodeURIComponent(doc.identifier)}` });
-    } catch { return null; }
-  }));
-  return tracks.filter(Boolean);
+  return [];
 }
-async function searchAll(query, limit, wave) {
-  const tasks = [];
-  // In wave mode use trending when the client sends no specific search phrase.
-  tasks.push(searchAudius(query, limit));
-  tasks.push(searchArchive(query, Math.min(limit, 8)));
+function normalizeVeromeItem(item) {
+  const artist = Array.isArray(item.artist) ? item.artist.map(a => typeof a === 'string' ? a : a?.name).filter(Boolean).join(', ') :
+    (typeof item.artist === 'object' ? item.artist?.name : item.artist) || item.artistNames || item.author || item.channel || item.uploader || 'YouTube Music';
+  const thumbs = item.thumbnails || item.thumbnail || item.thumb || item.artwork || [];
+  const thumb = Array.isArray(thumbs) ? (thumbs.at(-1)?.url || thumbs[0]?.url || '') : (typeof thumbs === 'string' ? thumbs : thumbs?.url || thumbs?.['480x480'] || '');
+  const id = item.videoId || item.video_id || item.id || item.browseId;
+  if (!id) return null;
+  return { id: `verome:${id}`, source: 'verome', sourceId: String(id), title: String(item.name || item.title || item.titleText || 'Без названия'), ch: String(artist), thumb, duration: Number(item.duration || item.durationSeconds || 0) > 10000 ? Math.round(Number(item.duration || 0) / 1000) : Number(item.duration || item.durationSeconds || 0), url: item.url || '' };
+}
+async function searchYoutubeMusicPackage(query, limit) {
+  if (!ytMusicApiPromise) ytMusicApiPromise = (async () => {
+    const YoutubeMusicApi = require('youtube-music-api');
+    const api = new YoutubeMusicApi();
+    await api.initalize();
+    return api;
+  })();
+  const api = await ytMusicApiPromise;
+  const result = await api.search(query || 'popular music', 'song');
+  const items = Array.isArray(result?.content) ? result.content : [];
+  return items.slice(0, limit).map(normalizeVeromeItem).filter(Boolean).map(track => ({...track, source:'verome', id:'verome:'+track.sourceId}));
+}
+
+async function searchVerome(query, limit, offset = 0) {
+  const u = new URL(VEROME_API + '/api/search');
+  u.searchParams.set('q', query || 'trending music');
+  u.searchParams.set('filter', 'song');
+  // Verome currently documents search but not stable offset/continuation paging.
+  const data = await fetchJson(u.toString(), 11000);
+  const items = pickArray(data).map(normalizeVeromeItem).filter(Boolean);
+  const seen = new Set();
+  const unique = items.filter(item => { if (seen.has(item.id)) return false; seen.add(item.id); return true; });
+  return unique.slice(offset, offset + limit);
+}
+async function streamVerome(req, res, id) {
+  if (!id || !/^[a-zA-Z0-9_-]{5,80}$/.test(id)) throw new HttpError(400, 'Некорректный ID YouTube Music');
+  const data = await fetchJson(`${VEROME_API}/api/stream?id=${encodeURIComponent(id)}`, 12000);
+  function findUrl(v) {
+    if (!v || typeof v !== 'object') return '';
+    if (typeof v === 'string') return /^https:\/\//i.test(v) ? v : '';
+    for (const key of ['audioUrl','audio_url','streamUrl','stream_url','url','proxyUrl','proxy_url']) {
+      if (typeof v[key] === 'string' && /^https:\/\//i.test(v[key])) return v[key];
+    }
+    for (const key of ['audio','stream','streams','formats','data','result','url']) {
+      const got = findUrl(v[key]); if (got) return got;
+    }
+    if (Array.isArray(v)) for (const item of v) { const got = findUrl(item); if (got) return got; }
+    return '';
+  }
+  const audioUrl = findUrl(data);
+  if (!audioUrl) throw new HttpError(502, 'Verome не вернул прямой аудиопоток для этого трека');
+  const parsed = new URL(audioUrl);
+  const allowed = /(^|\.)googlevideo\.com$|(^|\.)youtube\.com$|(^|\.)piped\.video$|(^|\.)invidious\.io$|(^|\.)deno\.dev$|(^|\.)ytimg\.com$/i.test(parsed.hostname);
+  if (parsed.protocol !== 'https:' || !allowed) throw new HttpError(502, 'Источник вернул неподдерживаемый аудиохост');
+  const headers = { 'User-Agent': 'Mozilla/5.0 TelegramBeats/1.0', Accept: req.headers.accept || 'audio/*,*/*;q=0.8' };
+  if (req.headers.range) headers.Range = req.headers.range;
+  const upstream = await fetch(parsed, { method: req.method === 'HEAD' ? 'HEAD' : 'GET', headers, redirect: 'follow' });
+  if (!upstream.ok && upstream.status !== 206) { await upstream.body?.cancel().catch(()=>{}); throw new HttpError(502, `Аудиоисточник ответил HTTP ${upstream.status}`); }
+  const outHeaders = { 'Content-Type': upstream.headers.get('content-type') || 'audio/mp4', 'Accept-Ranges': upstream.headers.get('accept-ranges') || 'bytes', 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*' };
+  for (const key of ['content-length','content-range','last-modified','etag']) { const value=upstream.headers.get(key); if(value) outHeaders[key]=value; }
+  res.writeHead(upstream.status, outHeaders);
+  if (req.method === 'HEAD' || !upstream.body) return res.end();
+  await pipeline(Readable.fromWeb(upstream.body), res);
+}
+
+async function searchAll(query, limit, wave, offset = 0) {
+  const tasks = [searchVerome(query, Math.min(limit, 30), 0), searchYoutubeMusicPackage(query, Math.min(limit, 30))];
+  // Audius remains a fallback for tracks that can play directly in the app.
+  if (offset === 0) tasks.push(searchAudius(query, Math.min(limit, 25), 0));
   const results = await Promise.allSettled(tasks);
   const tracks = results.filter(result => result.status === 'fulfilled').flatMap(result => result.value);
   const errors = results.filter(result => result.status === 'rejected').map(result => result.reason?.message || 'Источник недоступен');
   const seen = new Set();
   const unique = tracks.filter(track => { if (seen.has(track.id)) return false; seen.add(track.id); return true; });
-  return { tracks: unique.slice(0, limit), errors };
+  unique.sort((a,b) => (a.source === 'verome' ? 0 : 1) - (b.source === 'verome' ? 0 : 1));
+  return { tracks: unique.slice(offset, offset + limit), errors };
 }
 function parseUrl(req) { return new URL(req.url, `http://${req.headers.host || 'localhost'}`); }
 async function proxyAudio(req, res, url) {
@@ -175,11 +223,11 @@ async function proxyAudio(req, res, url) {
 }
 async function health() {
   const checks = await Promise.allSettled([
-    fetchJson('https://discoveryprovider.audius.co/v1/tracks/trending?app_name=' + APP_NAME + '&time=week&limit=1', 4500),
-    fetchJson('https://archive.org/advancedsearch.php?q=mediatype%3Aaudio&rows=1&output=json', 4500)
+    fetchJson(VEROME_API + '/api/search?q=music&filter=song', 5000),
+    fetchJson('https://discoveryprovider.audius.co/v1/tracks/trending?app_name=' + APP_NAME + '&time=week&limit=1', 4500)
   ]);
-  const providers = { audius: checks[0].status === 'fulfilled', archive: checks[1].status === 'fulfilled' };
-  return { ok: Object.values(providers).some(Boolean), providers, message: Object.values(providers).some(Boolean) ? 'Хотя бы один онлайн-источник доступен' : 'Сервер работает, но музыкальные источники не отвечают' };
+  const providers = { youtubeMusic: checks[0].status === 'fulfilled', audius: checks[1].status === 'fulfilled' };
+  return { ok: Object.values(providers).some(Boolean), providers, message: Object.values(providers).some(Boolean) ? 'Хотя бы один музыкальный источник доступен' : 'Сервер работает, но музыкальные источники не отвечают' };
 }
 const server = http.createServer(async (req, res) => {
   try {
@@ -189,10 +237,11 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/api/search') {
       const query = (url.searchParams.get('query') || '').trim().slice(0, 120);
       const limit = Math.max(1, Math.min(Number(url.searchParams.get('limit') || 20), 30));
-      const result = await searchAll(query, limit, url.searchParams.get('wave') === '1');
+      const offset = Math.max(0, Math.min(Number(url.searchParams.get('offset') || 0), 10000));
+      const result = await searchAll(query, limit, url.searchParams.get('wave') === '1', offset);
       json(res, 200, result); return;
     }
-    if ((req.method === 'GET' || req.method === 'HEAD') && url.pathname === '/api/stream') { await proxyAudio(req, res, url); return; }
+    if ((req.method === 'GET' || req.method === 'HEAD') && url.pathname === '/api/stream') { if (url.searchParams.get('provider') === 'verome') await streamVerome(req, res, url.searchParams.get('id') || ''); else await proxyAudio(req, res, url); return; }
     if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) {
       const body = fs.readFileSync(path.join(ROOT, 'index.html'));
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Content-Length': body.length, 'Cache-Control': 'no-cache' }); res.end(body); return;
