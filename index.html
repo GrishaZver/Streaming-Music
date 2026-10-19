@@ -433,7 +433,17 @@ function setCover(t) {
   } else { l.style.backgroundImage = ''; l.classList.remove('has'); }
 }
 function togglePlay() {
-  if (ytMode) { audio.paused ? audio.play().catch(() => {}) : audio.pause(); return; }
+  if (ytMode) {
+    if (audio.paused) {
+      const attempt = audio.play();
+      if (attempt && typeof attempt.catch === 'function') attempt.catch(err => {
+        console.warn('Remote playback failed:', err);
+        ytSetPlaying(false);
+        toast(err && err.name === 'NotAllowedError' ? 'Браузер заблокировал запуск. Нажми ▶ ещё раз.' : 'Не удалось запустить поток. Проверь источник.');
+      });
+    } else audio.pause();
+    return;
+  }
   if (!S.tracks.length) return $('file').click();
   const v = view();
   if (S.cur == null) return v.length && play(v[0].id);
@@ -489,7 +499,7 @@ audio.onloadedmetadata = () => {   // длительность для стары
   updatePos();
 };
 audio.onended = () => { if (ytMode) { if (S.repeat === 2) { audio.currentTime = 0; audio.play().catch(() => {}); } else ytNextAutomatic(); return; } if (S.repeat === 2) { audio.currentTime = 0; audio.play(); } else step(1, true); };
-audio.onerror = () => { if (ytMode) { toast('Поток недоступен'); ytSetPlaying(false); if(S.wave) { ytFailedSkips++; if(ytFailedSkips>=Math.max(3,ytQ.length)) { S.wave=false; save2(); updModes(); ytMessage('Источники вернули ссылки, но аудио не воспроизводится. Попробуй другой интернет или загрузи MP3.'); ytSetPlaying(false); } else setTimeout(ytNextAutomatic,500); } return; } if (S.cur != null) { toast('Файл не открывается — пропускаю'); setTimeout(() => step(1, true), 600); } };
+audio.onerror = () => { if (ytMode) { const code = audio.error?.code || 0; const reason = code === 2 ? 'сетевая ошибка' : code === 3 ? 'ошибка декодирования' : code === 4 ? 'формат не поддерживается' : 'источник не отдал аудио'; toast('Не удалось воспроизвести: ' + reason); ytSetPlaying(false); if(S.wave) { ytFailedSkips++; if(ytFailedSkips>=Math.max(3,ytQ.length)) { S.wave=false; save2(); updModes(); ytMessage('Поиск работает, но источники не отдали воспроизводимый аудиопоток (' + reason + '). Проверьте /api/health и логи Render.'); ytSetPlaying(false); } else setTimeout(ytNextAutomatic,500); } else ytMessage('Трек найден, но аудио не загрузилось: ' + reason + '. Попробуй другой трек.'); return; } if (S.cur != null) { toast('Файл не открывается — пропускаю'); setTimeout(() => step(1, true), 600); } };
 $('seek').oninput = e => {
   if (audio.duration) audio.currentTime = e.target.value / 1000 * audio.duration;
 };
@@ -775,7 +785,7 @@ async function ytRefillWave(start=false) {
   } catch(error) { S.wave=false; save2(); updModes(); ytMessage((error.name==='AbortError'||/тайм-аут/i.test(error.message||''))?'Источник не ответил вовремя. Попробуй ещё раз или добавь MP3-файлы.':(error.message||'Не удалось подобрать музыку')); toast('Поиск завершён: музыка не найдена'); }
   finally { ytWaveLoading=false; }
 }
-async function resolveStream(track) {
+function resolveStream(track) {
   if(track.source==='local') { const local=S.tracks.find(t=>String(t.id)===track.sourceId); if(!local) throw new Error('Файл удалён из библиотеки'); return URL.createObjectURL(local.file); }
   if(track.source==='archive' || track.source==='audius') {
     const params = new URLSearchParams({provider:track.source, id:track.sourceId});
@@ -792,23 +802,31 @@ async function ytPlay(index) {
   $('cur').textContent='0:00'; $('dur').textContent=track.duration?fmt(track.duration):'0:00'; $('seek').value=0; $('seek').style.setProperty('--p','0%');
   $('label').style.backgroundImage=track.thumb?`url("${track.thumb}")`:''; $('label').classList.toggle('has',!!track.thumb); renderYT();
   try {
-    const streamUrl=await Promise.race([
-      resolveStream(track),
-      new Promise((_,reject)=>setTimeout(()=>reject(new Error('Источник не выдал аудио за 8 секунд')),8000))
-    ]);
-    // Do not force CORS mode for remote audio: some otherwise playable archive streams omit CORS headers.
-    audio.removeAttribute('crossorigin'); audio.muted = false; if (audio.volume === 0) audio.volume = 1; audio.src=streamUrl; audio.load();
-    try {
-      await audio.play();
-      if (ac && ac.state === 'suspended') await ac.resume();
-      ytSetPlaying(true);
-    } catch (err) {
-      console.warn('Playback was blocked:', err);
-      toast('Нажми ▶, чтобы разрешить воспроизведение.');
-      ytSetPlaying(false);
+    // Build the URL synchronously and call play() before the first await.
+    // This preserves the user's tap on mobile browsers, which otherwise may block playback.
+    const streamUrl = resolveStream(track);
+    audio.removeAttribute('crossorigin');
+    audio.muted = false;
+    if (audio.volume === 0) audio.volume = 1;
+    audio.src = streamUrl;
+    audio.load();
+    const playAttempt = audio.play();
+    if (playAttempt && typeof playAttempt.then === 'function') {
+      try {
+        await playAttempt;
+        if (ac && ac.state === 'suspended') ac.resume().catch(err => console.warn('AudioContext resume:', err));
+        ytSetPlaying(true);
+      } catch (err) {
+        console.warn('Playback was blocked:', err);
+        ytSetPlaying(false);
+        ytMessage(err && err.name === 'NotAllowedError'
+          ? 'Трек найден. Нажми большую кнопку ▶ ещё раз — браузер блокирует автоматический запуск.'
+          : 'Трек найден, но поток не запустился. Попробуй следующий трек.');
+        toast(err && err.name === 'NotAllowedError' ? 'Нажми ▶, чтобы разрешить воспроизведение.' : 'Не удалось запустить аудио');
+      }
     }
     if('mediaSession' in navigator) try{navigator.mediaSession.metadata=new MediaMetadata({title:track.title,artist:track.ch||'',artwork:track.thumb?[{src:track.thumb}]:[]});}catch{}
-  } catch(error) { console.error(error); toast((track.source||'Источник')+': трек недоступен'); if(S.wave) { ytFailedSkips++; if(ytFailedSkips>=Math.max(3,ytQ.length)) { S.wave=false; save2(); updModes(); ytMessage('Найденные ссылки не воспроизводятся. Попробуй другой источник или загрузи MP3.'); ytSetPlaying(false); } else setTimeout(ytNextAutomatic,450); } }
+  } catch(error) { console.error(error); toast((track.source||'Источник')+': трек недоступен'); if(S.wave) { ytFailedSkips++; if(ytFailedSkips>=Math.max(3,ytQ.length)) { S.wave=false; save2(); updModes(); ytMessage('Не удалось подготовить аудиопоток. Проверь /api/health и логи Render.'); ytSetPlaying(false); } else setTimeout(ytNextAutomatic,450); } }
 }
 async function ytNextAutomatic() {
   if(!ytMode) return;
