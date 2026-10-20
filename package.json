@@ -1,16 +1,17 @@
 {
   "name": "telegram-beats-self-hosted",
-  "version": "1.2.0",
+  "version": "1.4.0",
   "private": true,
   "description": "Telegram Beats music player with a small streaming/search backend",
   "scripts": {
+    "postinstall": "ytdlp-nodejs update",
     "start": "node server.js"
   },
   "engines": {
     "node": ">=20"
   },
   "dependencies": {
-    "ytdlp-nodejs": "latest",
+    "ytdlp-nodejs": "^3.4.5",
     "youtube-music-api": "latest"
   }
 }
