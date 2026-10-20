@@ -11,7 +11,6 @@ const ytdlp = new YtDlp();
 // или путь к файлу в YT_COOKIES_FILE (например, Secret File на Render: /etc/secrets/cookies.txt)
 function normalizeCookies(raw) {
   let text = String(raw || '').replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n').replace(/\\n/g, '\n').trim();
-  // если строки склеились в одну — снова разделяем перед каждой cookie-строкой
   text = text.replace(/[ \t]+(?=(?:#HttpOnly_)?\.?[A-Za-z0-9.-]+[ \t]+(?:TRUE|FALSE)[ \t]+\/)/g, '\n');
   const out = ['# Netscape HTTP Cookie File'];
   for (const line of text.split('\n')) {
@@ -20,7 +19,6 @@ function normalizeCookies(raw) {
     if (l.startsWith('#') && !l.startsWith('#HttpOnly_')) continue;
     const parts = l.split(/\s+/);
     if (parts.length < 7) continue;
-    // 6 первых полей + значение (значение может быть пустым только если полей ровно 6 — такие пропускаем)
     out.push(parts.slice(0, 6).join('\t') + '\t' + parts.slice(6).join(' '));
   }
   return { text: out.join('\n') + '\n', count: out.length - 1 };
@@ -250,19 +248,10 @@ async function searchAll(query, limit, wave, offset = 0) {
 }
 
 /* ---------- Резолв аудио через yt-dlp ---------- */
-const inflight = new Map();
-function getAudioUrl(videoId, force = false) {
-  if (force) audioUrlCache.delete(videoId);
+async function getAudioUrl(videoId) {
   const cached = audioUrlCache.get(videoId);
-  if (cached && cached.expires > Date.now()) return Promise.resolve(cached);
-  if (inflight.has(videoId)) return inflight.get(videoId);
-  const p = resolveAudioUrl(videoId).finally(() => inflight.delete(videoId));
-  inflight.set(videoId, p);
-  return p;
-}
+  if (cached && cached.expires > Date.now()) return cached;
 
-async function resolveAudioUrl(videoId) {
-  const t0 = Date.now();
   const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
   const info = await ytdlp.getInfoAsync(videoUrl, {
     format: 'bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio',
@@ -286,23 +275,16 @@ async function resolveAudioUrl(videoId) {
     throw new Error('yt-dlp не вернул URL аудиопотока (возможно, требуется cookies)');
   }
 
-  // ссылка googlevideo живёт несколько часов: берём время из параметра expire, с запасом
-  let ttl = 30 * 60 * 1000;
-  try {
-    const exp = Number(new URL(url).searchParams.get('expire'));
-    if (exp) ttl = Math.max(60 * 1000, Math.min(exp * 1000 - Date.now() - 10 * 60 * 1000, 3 * 60 * 60 * 1000));
-  } catch {}
-
-  const entry = { url, expires: Date.now() + ttl };
+  const entry = { url, expires: Date.now() + 5 * 60 * 1000 };
   audioUrlCache.set(videoId, entry);
-  if (audioUrlCache.size > 200) {
+  if (audioUrlCache.size > 50) {
     audioUrlCache.delete(audioUrlCache.keys().next().value);
   }
-  console.log('[ytmusic] resolved', videoId, 'за', Date.now() - t0, 'мс');
+  console.log('[ytmusic] resolved', videoId, '→', url.slice(0, 80) + '…');
   return entry;
 }
 
-async function streamYouTubeMusic(req, res, videoId, retried = false) {
+async function streamYouTubeMusic(req, res, videoId) {
   if (!videoId || !/^[a-zA-Z0-9_-]{5,80}$/.test(videoId)) {
     throw new HttpError(400, 'Некорректный YouTube ID');
   }
@@ -338,13 +320,6 @@ async function streamYouTubeMusic(req, res, videoId, retried = false) {
       : `Сетевая ошибка googlevideo: ${error.message}`);
   }
   clearTimeout(timeout);
-
-  // ссылка могла протухнуть — один раз обновляем и повторяем запрос
-  if ((upstream.status === 403 || upstream.status === 410) && !retried) {
-    await upstream.body?.cancel().catch(() => {});
-    audioUrlCache.delete(videoId);
-    return streamYouTubeMusic(req, res, videoId, true);
-  }
 
   if (!upstream.ok && upstream.status !== 206) {
     await upstream.body?.cancel().catch(() => {});
@@ -496,13 +471,6 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    if (req.method === 'GET' && url.pathname === '/api/prefetch') {
-      const id = url.searchParams.get('id') || '';
-      if (/^[a-zA-Z0-9_-]{5,80}$/.test(id)) getAudioUrl(id).catch(() => {});
-      json(res, 200, { ok: true });
-      return;
-    }
-
     if (req.method === 'GET' && url.pathname === '/api/search') {
       const query = (url.searchParams.get('query') || '').trim().slice(0, 120);
       const limit = Math.max(1, Math.min(Number(url.searchParams.get('limit') || 20), 30));
@@ -530,13 +498,13 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    if (req.method === 'GET' && /^\/(manifest\.json|icon-192\.png|sw\.js)$/.test(url.pathname)) {
+    if (req.method === 'GET' && /^\/(manifest\.json|icon-192\.png|icon-512\.png|sw\.js)$/.test(url.pathname)) {
       const file = path.join(ROOT, url.pathname.slice(1));
       if (!fs.existsSync(file)) { sendText(res, 404, 'Not found'); return; }
       const type = file.endsWith('.js') ? 'text/javascript; charset=utf-8'
         : file.endsWith('.json') ? 'application/json; charset=utf-8'
         : 'image/png';
-      res.writeHead(200, { 'Content-Type': type });
+      res.writeHead(200, { 'Content-Type': type, 'Cache-Control': /sw\.js|manifest/.test(file) ? 'no-cache' : 'public, max-age=86400' });
       fs.createReadStream(file).pipe(res);
       return;
     }
