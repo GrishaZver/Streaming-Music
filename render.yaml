@@ -6,3 +6,6 @@ services:
     buildCommand: npm install
     startCommand: npm start
     healthCheckPath: /api/health
+    envVars:            # <-- добавьте этот блок
+      - key: YTDL_NO_UPDATE
+        value: "1"
