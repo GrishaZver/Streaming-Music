@@ -9,18 +9,37 @@ const ytdlp = new YtDlp();
 
 // Cookies для yt-dlp: содержимое cookies.txt (формат Netscape) в переменной YT_COOKIES_TXT
 // или путь к файлу в YT_COOKIES_FILE (например, Secret File на Render: /etc/secrets/cookies.txt)
+function normalizeCookies(raw) {
+  let text = String(raw || '').replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n').replace(/\\n/g, '\n').trim();
+  // если строки склеились в одну — снова разделяем перед каждой cookie-строкой
+  text = text.replace(/[ \t]+(?=(?:#HttpOnly_)?\.?[A-Za-z0-9.-]+[ \t]+(?:TRUE|FALSE)[ \t]+\/)/g, '\n');
+  const out = ['# Netscape HTTP Cookie File'];
+  for (const line of text.split('\n')) {
+    const l = line.trim();
+    if (!l) continue;
+    if (l.startsWith('#') && !l.startsWith('#HttpOnly_')) continue;
+    const parts = l.split(/\s+/);
+    if (parts.length < 7) continue;
+    // 6 первых полей + значение (значение может быть пустым только если полей ровно 6 — такие пропускаем)
+    out.push(parts.slice(0, 6).join('\t') + '\t' + parts.slice(6).join(' '));
+  }
+  return { text: out.join('\n') + '\n', count: out.length - 1 };
+}
+
 let COOKIES_PATH = null;
-if (process.env.YT_COOKIES_TXT) {
-  try {
-    COOKIES_PATH = path.join(require('node:os').tmpdir(), 'yt-cookies.txt');
-    fs.writeFileSync(COOKIES_PATH, process.env.YT_COOKIES_TXT.replace(/\\n/g, '\n'), { mode: 0o600 });
-    console.log('[yt-dlp] cookies loaded from YT_COOKIES_TXT');
-  } catch (e) { console.warn('[yt-dlp] cannot write cookies:', e.message); COOKIES_PATH = null; }
-} else if (process.env.YT_COOKIES_FILE && fs.existsSync(process.env.YT_COOKIES_FILE)) {
-  // yt-dlp может обновлять файл cookies, а секретные файлы Render только для чтения — копируем
-  COOKIES_PATH = path.join(require('node:os').tmpdir(), 'yt-cookies.txt');
-  fs.copyFileSync(process.env.YT_COOKIES_FILE, COOKIES_PATH);
-  console.log('[yt-dlp] cookies loaded from', process.env.YT_COOKIES_FILE);
+{
+  let raw = null;
+  if (process.env.YT_COOKIES_TXT) raw = process.env.YT_COOKIES_TXT;
+  else if (process.env.YT_COOKIES_FILE && fs.existsSync(process.env.YT_COOKIES_FILE)) raw = fs.readFileSync(process.env.YT_COOKIES_FILE, 'utf8');
+  if (raw) {
+    try {
+      const { text, count } = normalizeCookies(raw);
+      COOKIES_PATH = path.join(require('node:os').tmpdir(), 'yt-cookies.txt');
+      fs.writeFileSync(COOKIES_PATH, text, { mode: 0o600 });
+      console.log('[yt-dlp] cookies loaded, lines:', count);
+      if (!count) console.warn('[yt-dlp] в cookies не найдено ни одной корректной строки — проверь формат');
+    } catch (e) { console.warn('[yt-dlp] cannot write cookies:', e.message); COOKIES_PATH = null; }
+  }
 }
 
 (async () => {
