@@ -10,7 +10,7 @@
     "node": ">=20"
   },
   "dependencies": {
-    "youtube-music-api": "latest",
-    "youtubei.js": "latest"
+    "ytdlp-nodejs": "latest",
+    "youtube-music-api": "latest"
   }
 }
