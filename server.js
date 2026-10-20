@@ -7,6 +7,22 @@ const { pipeline } = require('node:stream/promises');
 const { YtDlp, helpers } = require('ytdlp-nodejs');
 const ytdlp = new YtDlp();
 
+// Cookies для yt-dlp: содержимое cookies.txt (формат Netscape) в переменной YT_COOKIES_TXT
+// или путь к файлу в YT_COOKIES_FILE (например, Secret File на Render: /etc/secrets/cookies.txt)
+let COOKIES_PATH = null;
+if (process.env.YT_COOKIES_TXT) {
+  try {
+    COOKIES_PATH = path.join(require('node:os').tmpdir(), 'yt-cookies.txt');
+    fs.writeFileSync(COOKIES_PATH, process.env.YT_COOKIES_TXT.replace(/\\n/g, '\n'), { mode: 0o600 });
+    console.log('[yt-dlp] cookies loaded from YT_COOKIES_TXT');
+  } catch (e) { console.warn('[yt-dlp] cannot write cookies:', e.message); COOKIES_PATH = null; }
+} else if (process.env.YT_COOKIES_FILE && fs.existsSync(process.env.YT_COOKIES_FILE)) {
+  // yt-dlp может обновлять файл cookies, а секретные файлы Render только для чтения — копируем
+  COOKIES_PATH = path.join(require('node:os').tmpdir(), 'yt-cookies.txt');
+  fs.copyFileSync(process.env.YT_COOKIES_FILE, COOKIES_PATH);
+  console.log('[yt-dlp] cookies loaded from', process.env.YT_COOKIES_FILE);
+}
+
 (async () => {
   try {
     await helpers.downloadYtDlp();
@@ -222,7 +238,8 @@ async function getAudioUrl(videoId) {
   const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
   const info = await ytdlp.getInfoAsync(videoUrl, {
     format: 'bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio',
-    cookiesFromBrowser: process.env.YT_COOKIES_FROM_BROWSER || undefined,
+    cookies: COOKIES_PATH || undefined,
+    cookiesFromBrowser: COOKIES_PATH ? undefined : (process.env.YT_COOKIES_FROM_BROWSER || undefined),
   });
 
   let url = info && info.url;
