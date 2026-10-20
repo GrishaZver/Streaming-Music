@@ -1,10 +1,10 @@
 {
   "name": "telegram-beats-self-hosted",
-  "version": "1.4.1",
+  "version": "1.4.2",
   "private": true,
   "description": "Telegram Beats music player with a small streaming/search backend",
   "scripts": {
-    "postinstall": "node -e \"const {YtDlp}=require('ytdlp-nodejs'); new YtDlp().downloadYtDlp().then(()=>console.log('yt-dlp binary downloaded')).catch(e=>console.error(e))\"",
+    "postinstall": "node -e \"const {helpers}=require('ytdlp-nodejs'); helpers.downloadYtDlp().then(()=>console.log('yt-dlp binary downloaded')).catch(e=>console.warn('yt-dlp download skipped:', e.message))\"",
     "start": "node server.js"
   },
   "engines": {
