@@ -246,15 +246,22 @@ async function getYtInfo(videoId) {
   return info;
 }
 
-function chooseBestAudio(info) {
-  // youtubei.js: выбираем аудиоформат с наибольшим битрейтом
-  const audioFormats = info.streaming_data?.adaptive_formats?.filter(f => f.has_audio && !f.has_video) || [];
-  if (!audioFormats.length) {
-    // fallback: любой формат с аудио
-    const anyAudio = info.streaming_data?.formats?.filter(f => f.has_audio) || [];
+function chooseBestAudio(info, userAgent = '') {
+  const formats = (info.streaming_data?.adaptive_formats || [])
+    .filter(f => f.has_audio && !f.has_video);
+  if (!formats.length) {
+    const anyAudio = (info.streaming_data?.formats || []).filter(f => f.has_audio);
     return anyAudio.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
   }
-  return audioFormats.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+
+  // mp4/aac играет везде — Chrome, Firefox, Safari, iOS
+  const mp4 = formats.filter(f => /mp4|aac|m4a/i.test(f.mime_type || ''));
+  if (mp4.length) {
+    return mp4.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+  }
+
+  // Fallback — если mp4 нет, берём лучший из остальных
+  return formats.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
 }
 
 async function streamYouTubeMusic(req, res, videoId) {
