@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { Readable } = require('node:stream');
 const { pipeline } = require('node:stream/promises');
-const { Innertube } = require('youtubei.js');
+const { YtDlp } = require('ytdlp-nodejs');
 
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -15,9 +15,9 @@ const AUDIUS_NODES = [
   'https://api.audius.co/v1'
 ];
 
+const ytdlp = new YtDlp();
 let ytMusicApiPromise = null;
-let innertubePromise = null;
-const ytInfoCache = new Map();
+const audioUrlCache = new Map();
 
 class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
@@ -46,7 +46,7 @@ async function fetchTimed(url, options = {}, timeoutMs = 7000) {
       signal: controller.signal,
       redirect: 'follow',
       headers: {
-        'User-Agent': 'TelegramBeats/1.2 (+self-hosted music player)',
+        'User-Agent': 'TelegramBeats/1.4 (+self-hosted music player)',
         ...(options.headers || {})
       }
     });
@@ -120,20 +120,6 @@ async function searchAudius(query, limit, offset = 0) {
 }
 
 /* ---------- YouTube Music (только поиск) ---------- */
-function pickArray(value) {
-  if (Array.isArray(value)) return value;
-  if (!value || typeof value !== 'object') return [];
-  for (const key of ['songs', 'tracks', 'results', 'items', 'content', 'data']) {
-    const candidate = value[key];
-    if (Array.isArray(candidate)) return candidate;
-    if (candidate && typeof candidate === 'object') {
-      const nested = pickArray(candidate);
-      if (nested.length) return nested;
-    }
-  }
-  return [];
-}
-
 function normalizeYouTubeItem(item) {
   const artist = Array.isArray(item.artist)
     ? item.artist.map(a => typeof a === 'string' ? a : a?.name).filter(Boolean).join(', ')
@@ -218,50 +204,40 @@ async function searchAll(query, limit, wave, offset = 0) {
   return { tracks: interleaveBySource(unique).slice(offset, offset + limit), errors };
 }
 
-/* ---------- YouTube-стриминг через youtubei.js ---------- */
-async function getInnertube() {
-  if (!innertubePromise) {
-    innertubePromise = Innertube.create({
-      lang: 'ru',
-      location: 'RU',
-      retrieve_player: true,
-      cookie: process.env.YT_COOKIES || undefined
-    });
+/* ---------- Резолв аудио через yt-dlp ---------- */
+async function getAudioUrl(videoId) {
+  const cached = audioUrlCache.get(videoId);
+  if (cached && cached.expires > Date.now()) return cached;
+
+  const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
+  const info = await ytdlp.getInfoAsync(videoUrl, {
+    format: 'bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio',
+    cookiesFromBrowser: process.env.YT_COOKIES_FROM_BROWSER || undefined,
+  });
+
+  let url = info && info.url;
+  if (!url && Array.isArray(info?.formats)) {
+    const pick = info.formats
+      .filter(f => f.acodec && f.acodec !== 'none' && (f.vcodec === 'none' || !f.vcodec))
+      .sort((a, b) => (b.abr || b.tbr || 0) - (a.abr || a.tbr || 0))[0];
+    if (pick && pick.url) url = pick.url;
   }
-  return innertubePromise;
-}
-
-async function getYtInfo(videoId) {
-  const cached = ytInfoCache.get(videoId);
-  if (cached && cached.expires > Date.now()) return cached.info;
-
-  const youtube = await getInnertube();
-  const info = await youtube.getInfo(videoId);
-
-  ytInfoCache.set(videoId, { info, expires: Date.now() + 5 * 60 * 1000 });
-  if (ytInfoCache.size > 50) {
-    const firstKey = ytInfoCache.keys().next().value;
-    ytInfoCache.delete(firstKey);
-  }
-  return info;
-}
-
-function chooseBestAudio(info, userAgent = '') {
-  const formats = (info.streaming_data?.adaptive_formats || [])
-    .filter(f => f.has_audio && !f.has_video);
-  if (!formats.length) {
-    const anyAudio = (info.streaming_data?.formats || []).filter(f => f.has_audio);
-    return anyAudio.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+  if (!url && Array.isArray(info?.requested_downloads)) {
+    const first = info.requested_downloads[0];
+    if (first && first.url) url = first.url;
   }
 
-  // mp4/aac играет везде — Chrome, Firefox, Safari, iOS
-  const mp4 = formats.filter(f => /mp4|aac|m4a/i.test(f.mime_type || ''));
-  if (mp4.length) {
-    return mp4.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+  if (!url || typeof url !== 'string') {
+    throw new Error('yt-dlp не вернул URL аудиопотока (возможно, требуется cookies)');
   }
 
-  // Fallback — если mp4 нет, берём лучший из остальных
-  return formats.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+  const entry = { url, expires: Date.now() + 5 * 60 * 1000 };
+  audioUrlCache.set(videoId, entry);
+  if (audioUrlCache.size > 50) {
+    audioUrlCache.delete(audioUrlCache.keys().next().value);
+  }
+  console.log('[ytmusic] resolved', videoId, '→', url.slice(0, 80) + '…');
+  return entry;
 }
 
 async function streamYouTubeMusic(req, res, videoId) {
@@ -269,47 +245,37 @@ async function streamYouTubeMusic(req, res, videoId) {
     throw new HttpError(400, 'Некорректный YouTube ID');
   }
 
-  let info;
+  let entry;
   try {
-    info = await getYtInfo(videoId);
+    entry = await getAudioUrl(videoId);
   } catch (error) {
-    throw new HttpError(502, `Не удалось получить информацию о видео: ${error.message}`);
+    throw new HttpError(502, `yt-dlp: ${error.message}`);
   }
-
-const ua = req.headers['user-agent'] || '';
-const format = chooseBestAudio(info, ua);
-  if (!format) {
-    throw new HttpError(502, 'У этого видео нет доступного аудиоформата');
-  }
-
-  // youtubei.js: получаем прямой URL через decipher
-  const youtube = await getInnertube();
-let audioUrl = format.url;
-if (!audioUrl) {
-  if (typeof format.decipher !== 'function') {
-    throw new HttpError(502, 'Формат требует decipher, но метод недоступен');
-  }
-  try {
-    audioUrl = await format.decipher(youtube.session.player);
-  } catch (error) {
-    throw new HttpError(502, `Ошибка decipher: ${error.message}`);
-  }
-}
-if (!audioUrl || typeof audioUrl !== 'string') {
-  throw new HttpError(502, 'youtubei.js не смог получить URL аудиопотока');
-}
 
   const headers = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
     Accept: req.headers.accept || 'audio/*,*/*;q=0.8'
   };
   if (req.headers.range) headers.Range = req.headers.range;
+  if (process.env.YT_COOKIES) headers.Cookie = process.env.YT_COOKIES;
 
-  const upstream = await fetch(audioUrl, {
-    method: req.method === 'HEAD' ? 'HEAD' : 'GET',
-    headers,
-    redirect: 'follow'
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
+  let upstream;
+  try {
+    upstream = await fetch(entry.url, {
+      method: req.method === 'HEAD' ? 'HEAD' : 'GET',
+      headers,
+      redirect: 'follow',
+      signal: controller.signal
+    });
+  } catch (error) {
+    clearTimeout(timeout);
+    throw new HttpError(502, error.name === 'AbortError'
+      ? 'googlevideo не ответил за 15 секунд (возможно, IP Render заблокирован)'
+      : `Сетевая ошибка googlevideo: ${error.message}`);
+  }
+  clearTimeout(timeout);
 
   if (!upstream.ok && upstream.status !== 206) {
     await upstream.body?.cancel().catch(() => {});
@@ -317,7 +283,7 @@ if (!audioUrl || typeof audioUrl !== 'string') {
   }
 
   const outHeaders = {
-    'Content-Type': upstream.headers.get('content-type') || format.mime_type || 'audio/mp4',
+    'Content-Type': upstream.headers.get('content-type') || 'audio/mp4',
     'Accept-Ranges': upstream.headers.get('accept-ranges') || 'bytes',
     'Cache-Control': 'no-store',
     'Access-Control-Allow-Origin': '*'
@@ -326,6 +292,8 @@ if (!audioUrl || typeof audioUrl !== 'string') {
     const value = upstream.headers.get(key);
     if (value) outHeaders[key] = value;
   }
+
+  console.log('[ytmusic]', videoId, '→', outHeaders['Content-Type']);
 
   res.writeHead(upstream.status, outHeaders);
   if (req.method === 'HEAD' || !upstream.body) return res.end();
@@ -366,7 +334,7 @@ async function proxyAudio(req, res, url) {
       method: req.method === 'HEAD' ? 'HEAD' : 'GET',
       signal: controller.signal,
       redirect: 'follow',
-      headers: { ...headers, 'User-Agent': 'TelegramBeats/1.2' }
+      headers: { ...headers, 'User-Agent': 'TelegramBeats/1.4' }
     });
   } catch (error) {
     if (!res.headersSent) {
@@ -412,19 +380,30 @@ async function health() {
     providers.audius = true;
   } catch { providers.audius = false; }
 
-  // YouTube через youtubei.js
+  // YouTube через yt-dlp — резолвим URL и проверяем, что googlevideo отвечает
   try {
-    const youtube = await getInnertube();
-    const info = await youtube.getInfo('dQw4w9WgXcQ');
-    providers.youtube = !!info?.basic_info?.id;
-  } catch { providers.youtube = false; }
+    const entry = await getAudioUrl('dQw4w9WgXcQ');
+    const r = await fetch(entry.url, {
+      method: 'HEAD',
+      headers: { 'User-Agent': 'Mozilla/5.0 Chrome/131.0.0.0' }
+    });
+    providers.youtube = r.ok || r.status === 206;
+    if (!providers.youtube) {
+      providers.youtubeError = 'googlevideo HTTP ' + r.status;
+    } else {
+      providers.youtubeFormat = r.headers.get('content-type') || 'unknown';
+    }
+  } catch (e) {
+    providers.youtube = false;
+    providers.youtubeError = String(e.message || e).slice(0, 200);
+  }
 
   return {
-    ok: Object.values(providers).some(Boolean),
+    ok: providers.audius || providers.youtube,
     providers,
-    message: Object.values(providers).some(Boolean)
-      ? 'Хотя бы один источник и стрим доступны'
-      : 'Сервер работает, но источники/стриминг не отвечают'
+    message: (providers.audius || providers.youtube)
+      ? 'Хотя бы один источник доступен'
+      : 'Источники не отвечают'
   };
 }
 
