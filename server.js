@@ -284,11 +284,20 @@ const format = chooseBestAudio(info, ua);
 
   // youtubei.js: получаем прямой URL через decipher
   const youtube = await getInnertube();
-  const audioUrl = format.decipher(youtube.session.player);
-
-  if (!audioUrl) {
-    throw new HttpError(502, 'youtubei.js не смог получить URL аудиопотока');
+let audioUrl = format.url;
+if (!audioUrl) {
+  if (typeof format.decipher !== 'function') {
+    throw new HttpError(502, 'Формат требует decipher, но метод недоступен');
   }
+  try {
+    audioUrl = await format.decipher(youtube.session.player);
+  } catch (error) {
+    throw new HttpError(502, `Ошибка decipher: ${error.message}`);
+  }
+}
+if (!audioUrl || typeof audioUrl !== 'string') {
+  throw new HttpError(502, 'youtubei.js не смог получить URL аудиопотока');
+}
 
   const headers = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
