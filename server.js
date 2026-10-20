@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { Readable } = require('node:stream');
 const { pipeline } = require('node:stream/promises');
-const ytdl = require('@ybd-project/ytdl-core');
+const { Innertube } = require('youtubei.js');
 
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -14,8 +14,10 @@ const AUDIUS_NODES = [
   'https://discoveryprovider.audius.co/v1',
   'https://api.audius.co/v1'
 ];
+
 let ytMusicApiPromise = null;
-const ytInfoCache = new Map(); // videoId -> { info, expires }
+let innertubePromise = null;
+const ytInfoCache = new Map();
 
 class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
@@ -44,7 +46,7 @@ async function fetchTimed(url, options = {}, timeoutMs = 7000) {
       signal: controller.signal,
       redirect: 'follow',
       headers: {
-        'User-Agent': 'TelegramBeats/1.1 (+self-hosted music player)',
+        'User-Agent': 'TelegramBeats/1.2 (+self-hosted music player)',
         ...(options.headers || {})
       }
     });
@@ -176,7 +178,7 @@ async function searchYouTubeMusicPackage(query, limit) {
   return items.slice(0, limit).map(normalizeYouTubeItem).filter(Boolean);
 }
 
-/* ---------- Склейка результатов: источники чередуются ---------- */
+/* ---------- Склейка результатов ---------- */
 function interleaveBySource(tracks) {
   const buckets = new Map();
   for (const t of tracks) {
@@ -203,13 +205,8 @@ async function searchAll(query, limit, wave, offset = 0) {
   ];
 
   const results = await Promise.allSettled(tasks);
-
-  const tracks = results
-    .filter(r => r.status === 'fulfilled')
-    .flatMap(r => r.value);
-  const errors = results
-    .filter(r => r.status === 'rejected')
-    .map(r => r.reason?.message || 'Источник недоступен');
+  const tracks = results.filter(r => r.status === 'fulfilled').flatMap(r => r.value);
+  const errors = results.filter(r => r.status === 'rejected').map(r => r.reason?.message || 'Источник недоступен');
 
   const seen = new Set();
   const unique = tracks.filter(track => {
@@ -221,11 +218,26 @@ async function searchAll(query, limit, wave, offset = 0) {
   return { tracks: interleaveBySource(unique).slice(offset, offset + limit), errors };
 }
 
-/* ---------- Резолв YouTube ID -> аудиопоток ---------- */
+/* ---------- YouTube-стриминг через youtubei.js ---------- */
+async function getInnertube() {
+  if (!innertubePromise) {
+    innertubePromise = Innertube.create({
+      lang: 'ru',
+      location: 'RU',
+      retrieve_player: true,
+      cookie: process.env.YT_COOKIES || undefined
+    });
+  }
+  return innertubePromise;
+}
+
 async function getYtInfo(videoId) {
   const cached = ytInfoCache.get(videoId);
   if (cached && cached.expires > Date.now()) return cached.info;
-  const info = await ytdl.getInfo(`https://www.youtube.com/watch?v=${videoId}`);
+
+  const youtube = await getInnertube();
+  const info = await youtube.getInfo(videoId);
+
   ytInfoCache.set(videoId, { info, expires: Date.now() + 5 * 60 * 1000 });
   if (ytInfoCache.size > 50) {
     const firstKey = ytInfoCache.keys().next().value;
@@ -235,14 +247,14 @@ async function getYtInfo(videoId) {
 }
 
 function chooseBestAudio(info) {
-  const formats = info.formats.filter(f => f.url);
-  const audioOnly = formats
-    .filter(f => !f.hasVideo && f.hasAudio)
-    .sort((a, b) => (b.audioBitrate || 0) - (a.audioBitrate || 0));
-  if (audioOnly.length) return audioOnly[0];
-  return formats
-    .filter(f => f.hasAudio)
-    .sort((a, b) => (b.audioBitrate || 0) - (a.audioBitrate || 0))[0];
+  // youtubei.js: выбираем аудиоформат с наибольшим битрейтом
+  const audioFormats = info.streaming_data?.adaptive_formats?.filter(f => f.has_audio && !f.has_video) || [];
+  if (!audioFormats.length) {
+    // fallback: любой формат с аудио
+    const anyAudio = info.streaming_data?.formats?.filter(f => f.has_audio) || [];
+    return anyAudio.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+  }
+  return audioFormats.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
 }
 
 async function streamYouTubeMusic(req, res, videoId) {
@@ -258,17 +270,25 @@ async function streamYouTubeMusic(req, res, videoId) {
   }
 
   const format = chooseBestAudio(info);
-  if (!format || !format.url) {
-    throw new HttpError(502, 'У этого видео нет доступного аудиоформата (возможно, оно заблокировано)');
+  if (!format) {
+    throw new HttpError(502, 'У этого видео нет доступного аудиоформата');
+  }
+
+  // youtubei.js: получаем прямой URL через decipher
+  const youtube = await getInnertube();
+  const audioUrl = format.decipher(youtube.session.player);
+
+  if (!audioUrl) {
+    throw new HttpError(502, 'youtubei.js не смог получить URL аудиопотока');
   }
 
   const headers = {
-    'User-Agent': 'Mozilla/5.0 TelegramBeats/1.1',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
     Accept: req.headers.accept || 'audio/*,*/*;q=0.8'
   };
   if (req.headers.range) headers.Range = req.headers.range;
 
-  const upstream = await fetch(format.url, {
+  const upstream = await fetch(audioUrl, {
     method: req.method === 'HEAD' ? 'HEAD' : 'GET',
     headers,
     redirect: 'follow'
@@ -280,7 +300,7 @@ async function streamYouTubeMusic(req, res, videoId) {
   }
 
   const outHeaders = {
-    'Content-Type': upstream.headers.get('content-type') || format.mimeType || 'audio/mp4',
+    'Content-Type': upstream.headers.get('content-type') || format.mime_type || 'audio/mp4',
     'Accept-Ranges': upstream.headers.get('accept-ranges') || 'bytes',
     'Cache-Control': 'no-store',
     'Access-Control-Allow-Origin': '*'
@@ -329,7 +349,7 @@ async function proxyAudio(req, res, url) {
       method: req.method === 'HEAD' ? 'HEAD' : 'GET',
       signal: controller.signal,
       redirect: 'follow',
-      headers: { ...headers, 'User-Agent': 'TelegramBeats/1.1' }
+      headers: { ...headers, 'User-Agent': 'TelegramBeats/1.2' }
     });
   } catch (error) {
     if (!res.headersSent) {
@@ -365,20 +385,21 @@ async function proxyAudio(req, res, url) {
   catch (error) { if (!res.destroyed) res.destroy(error); }
 }
 
-/* ---------- Health: проверяем и поиск, и реальный стрим ---------- */
+/* ---------- Health ---------- */
 async function health() {
   const providers = {};
 
-  // Audius: trending
+  // Audius
   try {
     await fetchJson('https://discoveryprovider.audius.co/v1/tracks/trending?app_name=' + APP_NAME + '&time=week&limit=1', 4500);
     providers.audius = true;
   } catch { providers.audius = false; }
 
-  // YouTube: ytdl.getBasicInfo
+  // YouTube через youtubei.js
   try {
-    const test = await ytdl.getBasicInfo('https://www.youtube.com/watch?v=dQw4w9WgXcQ');
-    providers.youtube = !!(test && test.videoDetails && test.videoDetails.videoId);
+    const youtube = await getInnertube();
+    const info = await youtube.getInfo('dQw4w9WgXcQ');
+    providers.youtube = !!info?.basic_info?.id;
   } catch { providers.youtube = false; }
 
   return {
