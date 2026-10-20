@@ -4,7 +4,18 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { Readable } = require('node:stream');
 const { pipeline } = require('node:stream/promises');
-const { YtDlp } = require('ytdlp-nodejs');
+const { YtDlp, helpers } = require('ytdlp-nodejs');
+const ytdlp = new YtDlp();
+
+(async () => {
+  try {
+    await helpers.downloadYtDlp();
+    console.log('[yt-dlp] binary is ready');
+  } catch (e) {
+    console.warn('[yt-dlp] auto-download failed:', e.message);
+    console.warn('[yt-dlp] streaming may not work until binary is installed');
+  }
+})();
 
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -15,7 +26,6 @@ const AUDIUS_NODES = [
   'https://api.audius.co/v1'
 ];
 
-const ytdlp = new YtDlp();
 let ytMusicApiPromise = null;
 const audioUrlCache = new Map();
 
