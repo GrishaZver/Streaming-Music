@@ -276,7 +276,8 @@ async function streamYouTubeMusic(req, res, videoId) {
     throw new HttpError(502, `Не удалось получить информацию о видео: ${error.message}`);
   }
 
-  const format = chooseBestAudio(info);
+const ua = req.headers['user-agent'] || '';
+const format = chooseBestAudio(info, ua);
   if (!format) {
     throw new HttpError(502, 'У этого видео нет доступного аудиоформата');
   }
