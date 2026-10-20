@@ -250,10 +250,19 @@ async function searchAll(query, limit, wave, offset = 0) {
 }
 
 /* ---------- Резолв аудио через yt-dlp ---------- */
-async function getAudioUrl(videoId) {
+const inflight = new Map();
+function getAudioUrl(videoId, force = false) {
+  if (force) audioUrlCache.delete(videoId);
   const cached = audioUrlCache.get(videoId);
-  if (cached && cached.expires > Date.now()) return cached;
+  if (cached && cached.expires > Date.now()) return Promise.resolve(cached);
+  if (inflight.has(videoId)) return inflight.get(videoId);
+  const p = resolveAudioUrl(videoId).finally(() => inflight.delete(videoId));
+  inflight.set(videoId, p);
+  return p;
+}
 
+async function resolveAudioUrl(videoId) {
+  const t0 = Date.now();
   const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
   const info = await ytdlp.getInfoAsync(videoUrl, {
     format: 'bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio',
@@ -277,16 +286,23 @@ async function getAudioUrl(videoId) {
     throw new Error('yt-dlp не вернул URL аудиопотока (возможно, требуется cookies)');
   }
 
-  const entry = { url, expires: Date.now() + 5 * 60 * 1000 };
+  // ссылка googlevideo живёт несколько часов: берём время из параметра expire, с запасом
+  let ttl = 30 * 60 * 1000;
+  try {
+    const exp = Number(new URL(url).searchParams.get('expire'));
+    if (exp) ttl = Math.max(60 * 1000, Math.min(exp * 1000 - Date.now() - 10 * 60 * 1000, 3 * 60 * 60 * 1000));
+  } catch {}
+
+  const entry = { url, expires: Date.now() + ttl };
   audioUrlCache.set(videoId, entry);
-  if (audioUrlCache.size > 50) {
+  if (audioUrlCache.size > 200) {
     audioUrlCache.delete(audioUrlCache.keys().next().value);
   }
-  console.log('[ytmusic] resolved', videoId, '→', url.slice(0, 80) + '…');
+  console.log('[ytmusic] resolved', videoId, 'за', Date.now() - t0, 'мс');
   return entry;
 }
 
-async function streamYouTubeMusic(req, res, videoId) {
+async function streamYouTubeMusic(req, res, videoId, retried = false) {
   if (!videoId || !/^[a-zA-Z0-9_-]{5,80}$/.test(videoId)) {
     throw new HttpError(400, 'Некорректный YouTube ID');
   }
@@ -322,6 +338,13 @@ async function streamYouTubeMusic(req, res, videoId) {
       : `Сетевая ошибка googlevideo: ${error.message}`);
   }
   clearTimeout(timeout);
+
+  // ссылка могла протухнуть — один раз обновляем и повторяем запрос
+  if ((upstream.status === 403 || upstream.status === 410) && !retried) {
+    await upstream.body?.cancel().catch(() => {});
+    audioUrlCache.delete(videoId);
+    return streamYouTubeMusic(req, res, videoId, true);
+  }
 
   if (!upstream.ok && upstream.status !== 206) {
     await upstream.body?.cancel().catch(() => {});
@@ -470,6 +493,13 @@ const server = http.createServer(async (req, res) => {
 
     if ((req.method === 'GET' || req.method === 'HEAD') && url.pathname === '/api/health') {
       json(res, 200, await health());
+      return;
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/prefetch') {
+      const id = url.searchParams.get('id') || '';
+      if (/^[a-zA-Z0-9_-]{5,80}$/.test(id)) getAudioUrl(id).catch(() => {});
+      json(res, 200, { ok: true });
       return;
     }
 

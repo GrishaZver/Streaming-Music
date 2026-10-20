@@ -889,6 +889,14 @@ function ytPlay(index) {
     });
   }
 
+  // заранее просим сервер получить ссылки на следующие треки очереди — они начнут играть быстрее
+  try {
+    for (let k = 1; k <= 2; k++) {
+      const nt = ytQ[ytIdx + k];
+      if (nt && nt.source === 'ytmusic') fetch('/api/prefetch?id=' + encodeURIComponent(nt.sourceId)).catch(() => {});
+    }
+  } catch {}
+
   if ('mediaSession' in navigator) {
     try {
       navigator.mediaSession.metadata = new MediaMetadata({
